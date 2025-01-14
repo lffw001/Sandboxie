@@ -43,6 +43,7 @@ protected:
 	QTreeViewEx*		m_pTreeList;
 	CStackView*			m_pStackView;
 
+	QAction*			m_pAutoScroll;
 	//QRegularExpression	m_FilterExp;
 	QString				m_FilterExp;
 	bool				m_bHighLight;
@@ -71,6 +72,8 @@ public:
 
 	void				SetEnabled(bool bSet);
 
+	static bool			SaveToFile(QIODevice* pFile);
+
 public slots:
 	void				Refresh();
 	void				Clear();
@@ -78,7 +81,7 @@ public slots:
 	void				OnSetTree();
 	void				OnObjTree();
 	void				OnSetMode();
-	void				OnSetPidFilter();
+	void				OnSetPidFilter(QStandardItem* item);
 	void				OnSetTidFilter();
 	void				OnSetFilter();
 	void				OnShowStack();
@@ -93,6 +96,8 @@ protected:
 	void				timerEvent(QTimerEvent* pEvent);
 	int					m_uTimerID;
 
+	static void			SaveToFileAsync(const CSbieProgressPtr& pProgress, QVector<CTraceEntryPtr> ResourceLog, QIODevice* pFile);
+
 	struct SProgInfo
 	{
 		QString Name;
@@ -100,16 +105,15 @@ protected:
 	};
 
 	QMap<quint32, SProgInfo>m_PidMap;
+	bool					m_FullRefresh;
 	quint64					m_LastID;
 	int						m_LastCount;
 	bool					m_bUpdatePending;
 	QVector<CTraceEntryPtr> m_TraceList;
 	QMap<QString, CMonitorEntryPtr> m_MonitorMap;
 
-protected:
-	bool				m_FullRefresh;
-
-	quint32				m_FilterPid;
+	QSet<quint32>		m_ShowPids;
+	QSet<quint32>		m_HidePids;
 	quint32				m_FilterTid;
 	QList<quint32>		m_FilterTypes;
 	quint32				m_FilterStatus;
@@ -124,7 +128,7 @@ protected:
 	QAction*			m_pMonitorMode;
 	QAction*			m_pTraceTree;
 	QAction*			m_pObjectTree;
-	QComboBox*			m_pTracePid;
+	class CCheckableComboBox*	m_pTracePid;
 	QComboBox*			m_pTraceTid;
 	class QCheckList*	m_pTraceType;
 	QComboBox*			m_pTraceStatus;

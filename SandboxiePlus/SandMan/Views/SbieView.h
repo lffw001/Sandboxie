@@ -51,6 +51,8 @@ public:
 
 	//virtual void				UpdateRunMenu();
 
+	void						OnDoubleClicked(const CSandBoxPtr &pBox);
+
 	virtual QString				AddNewBox(bool bAlowTemp = false);
 	virtual QString				ImportSandbox();
 	virtual QString				AddNewGroup();
@@ -64,6 +66,8 @@ public:
 	virtual void				ShowBrowse(const CSandBoxPtr& pBox);
 
 	QMap<QString, QStringList>	GetGroups() { return m_Groups; }
+
+	static bool					CreateShortcutEx(const QString& LinkPath, const QString& BoxName, QString LinkName = QString(), const QString& IconPath = QString(), int IconIndex = 0, const QString& WorkDir = QString());
 
 signals:
 	void						BoxSelected();
@@ -121,8 +125,8 @@ private:
 	void					CreateGroupMenu();
 	void					CreateTrayMenu();
 
-	bool					UpdateMenu(bool bAdvanced, const CSandBoxPtr &pBox, int iSandBoxeCount = 1, bool bBoxBusy = false);
-	void					UpdateProcMenu(const CBoxedProcessPtr &pProcess = CBoxedProcessPtr(), int iProcessCount = 0);
+	bool					UpdateMenu(bool bAdvanced, const CSandBoxPtr &pBox, int iSandBoxeCount = 1, bool bBoxBusy = false, bool bBoxNotMounted = false);
+	void					UpdateProcMenu(const CBoxedProcessPtr &pProcess, int iProcessCount = 0, int iSuspendedCount = 0);
 	bool					UpdateMenu();
 	void					UpdateMoveMenu();
 	void					RenameGroup(const QString OldName, const QString NewName);
@@ -137,8 +141,6 @@ private:
 	void					ChangeExpand(const QModelIndex& index, bool bExpand);
 
 	QMenu*					GetMenuFolder(const QString& Folder, QMenu* pParent, QMap<QString, QMenu*>& Folders);
-
-	bool					CreateShortcut(const QString& LinkPath, const QString& BoxName, const QString& IconPath = QString(), int IconIndex = 0, const QString& WorkDir = QString());
 
 	QVBoxLayout*			m_pMainLayout;
 
@@ -191,6 +193,8 @@ private:
 	QAction*				m_pMenuBrowse;
 	QAction*				m_pMenuRefresh;
 	QAction*				m_pMenuRegEdit;
+	QAction*				m_pMenuMount;
+	QAction*				m_pMenuUnmount;
 	QAction*				m_pMenuRecover;
 	QAction*				m_pMenuCleanUp;
 	QAction*				m_pMenuRemove;
@@ -212,8 +216,8 @@ private:
 	QAction*				m_pMenuMarkLinger;
 	QAction*				m_pMenuMarkLeader;
 	QAction*				m_pMenuPinToRun;
-	//QAction*				m_pMenuSuspend;
-	//QAction*				m_pMenuResume;
+	QAction*				m_pMenuSuspend;
+	QAction*				m_pMenuResume;
 
 	QAction*				m_pRemove;
 

@@ -43,6 +43,13 @@ time_t GetTime()
 	return time;
 }
 
+__time64_t GetTimeMs()
+{
+	QDateTime dateTime = QDateTime::currentDateTime();
+	__time64_t time = dateTime.toMSecsSinceEpoch(); // returns time in seconds (since 1970-01-01T00:00:00) in UTC !
+	return time;
+}
+
 struct SCurTick
 {
 	SCurTick()	{Timer.start();}
@@ -610,16 +617,16 @@ bool InitConsole(bool bCreateIfNeeded)
 // avoid flashing a bright white window when in dark mode
 //
 
-void SafeShow(QWidget* pWidget) {
-	static bool Lock = false;
-	pWidget->setProperty("windowOpacity", 0.0);
-	if (Lock == false) {
-		Lock = true;
-		pWidget->show();
-		QApplication::processEvents(QEventLoop::ExcludeSocketNotifiers | QEventLoop::ExcludeSocketNotifiers);
-		Lock = false;
-	} else
-		pWidget->show();
-	pWidget->setProperty("windowOpacity", 1.0);
-}
+//void SafeShow(QWidget* pWidget) {
+//	static bool Lock = false;
+//	pWidget->setProperty("windowOpacity", 0.0);
+//	if (Lock == false) {
+//		Lock = true;
+//		pWidget->show();
+//		QApplication::processEvents(QEventLoop::ExcludeSocketNotifiers);
+//		Lock = false;
+//	} else
+//		pWidget->show();
+//	pWidget->setProperty("windowOpacity", 1.0);
+//}
 

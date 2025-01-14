@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016 wj32
- * Copyright (C) 2021 David Xanatos, xanasoft.com
+ * Copyright (C) 2021-2023 David Xanatos, xanasoft.com
  *
  * Process Hacker is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +18,9 @@
 
 #include "driver.h"
 #include "util.h"
+
+#include "api_defs.h"
+NTSTATUS Api_GetSecureParam(PROCESS* proc, ULONG64* parms);
 
 #include <bcrypt.h>
 
@@ -281,6 +284,45 @@ CleanupExit:
     return status;
 }
 
+NTSTATUS KphVerifyBuffer(
+    _In_ PUCHAR Buffer,
+    _In_ ULONG BufferSize,
+    _In_ PUCHAR Signature,
+    _In_ ULONG SignatureSize
+    )
+{
+    NTSTATUS status;
+    MY_HASH_OBJ hashObj;
+    PVOID hash = NULL;
+    ULONG hashSize;
+
+    // Hash the Buffer.
+
+    if(!NT_SUCCESS(status = MyInitHash(&hashObj)))
+        goto CleanupExit;
+
+    MyHashData(&hashObj, Buffer, BufferSize);
+
+	if(!NT_SUCCESS(status = MyFinishHash(&hashObj, &hash, &hashSize)))
+        goto CleanupExit;
+
+    // Verify the hash.
+
+    if (!NT_SUCCESS(status = KphVerifySignature(hash, hashSize, Signature, SignatureSize)))
+    {
+        goto CleanupExit;
+    }
+
+CleanupExit:
+
+    if (hash)
+        ExFreePoolWithTag(hash, 'vhpK');
+ 
+    MyFreeHash(&hashObj);
+
+    return status;
+}
+
 NTSTATUS KphReadSignature(    
     _In_ PUNICODE_STRING FileName,
     _Out_ PUCHAR *Signature,
@@ -401,7 +443,7 @@ extern POOL *Driver_Pool;
 
 NTSTATUS Conf_Read_Line(STREAM *stream, WCHAR *line, int *linenum);
 
-_FX VOID KphParseDate(const WCHAR* date_str, LARGE_INTEGER* date)
+_FX BOOLEAN KphParseDate(const WCHAR* date_str, LARGE_INTEGER* date)
 {
     TIME_FIELDS timeFiled = { 0 };
     const WCHAR* ptr = date_str;
@@ -422,8 +464,11 @@ _FX VOID KphParseDate(const WCHAR* date_str, LARGE_INTEGER* date)
             timeFiled.Year = (CSHORT)_wtoi(ptr);
 
             RtlTimeFieldsToTime(&timeFiled, date);
+
+            return TRUE;
         }
     }
+    return FALSE;
 }
 
 // Example of __DATE__ string: "Jul 27 2012"
@@ -481,27 +526,11 @@ _FX LONGLONG KphGetDateInterval(CSHORT days, CSHORT months, CSHORT years)
     return ((LONGLONG)days + (LONGLONG)months * 30ll + (LONGLONG)years * 365ll) * 24ll * 3600ll * 10000000ll; // 100ns steps -> 1sec
 }
 
-#define SOFTWARE_NAME L"Sandboxie-Plus"
+#include "verify.h"
 
-union _SCertInfo {
-    ULONGLONG	State;
-    struct {
-        ULONG
-            valid     : 1,      // certificate is active
-            expired   : 1,      // certificate is expired but may be active
-            outdated  : 1,      // certificate is expired, not anymore valid for the current build
-            business  : 1,      // certificate is suitable for business use
-            evaluation: 1,      // evaluation certificate
-            grace_period: 1,    // the certificate is expired and or outdated but we keep it valid for 1 extra month to allof wor a seamless renewal
-            reservd_1 : 2,
-            reservd_2 : 8,
-            reservd_3 : 8,
-            reservd_4 : 8;
-        ULONG expirers_in_sec;
-    };
-} Verify_CertInfo = {0};
+SCertInfo Verify_CertInfo = { 0 };
 
-_FX NTSTATUS KphValidateCertificate(void)
+_FX NTSTATUS KphValidateCertificate()
 {
     BOOLEAN CertDbg = FALSE;
 
@@ -524,16 +553,23 @@ _FX NTSTATUS KphValidateCertificate(void)
 
     WCHAR* type = NULL;
     WCHAR* level = NULL;
-    //WCHAR* key = NULL;
+    WCHAR* options = NULL;
+    LONG amount = 1;
+    WCHAR* key = NULL;
     LARGE_INTEGER cert_date = { 0 };
+    LONG days = 0;
 
     Verify_CertInfo.State = 0; // clear
 
     if(!NT_SUCCESS(status = MyInitHash(&hashObj)))
         goto CleanupExit;
 
+    //
+    // read (Home Path)\Certificate.dat
+    //
+
     path_len = wcslen(Driver_HomePathDos) * sizeof(WCHAR);
-    path_len += 64;     // room for \Certificate.ini
+    path_len += 64;     // room for \Certificate.dat
     path = Mem_Alloc(Driver_Pool, path_len);
     line = Mem_Alloc(Driver_Pool, line_size);
     temp = Mem_Alloc(Driver_Pool, line_size);
@@ -541,10 +577,6 @@ _FX NTSTATUS KphValidateCertificate(void)
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto CleanupExit;
     }
-
-    //
-    // read (Home Path)\Certificate.dat
-    //
 
     RtlStringCbPrintfW(path, path_len, path_cert, Driver_HomePathDos);
 
@@ -644,28 +676,75 @@ _FX NTSTATUS KphValidateCertificate(void)
         // Note: when parsing we may change the value of value, by adding \0's, hence we do all that after the hashing
         //
 
-        if (_wcsicmp(L"DATE", name) == 0 && cert_date.QuadPart == 0) {
+        if(CertDbg) DbgPrint("Cert Value: %S: %S\n", name, value);
+
+        if (_wcsicmp(L"DATE", name) == 0) {
+            if (cert_date.QuadPart != 0) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
             // DD.MM.YYYY
-            KphParseDate(value, &cert_date);
+            if (KphParseDate(value, &cert_date)) {
+                // DD.MM.YYYY +Days
+                WCHAR* ptr = wcschr(value, L'+');
+                if (ptr)
+                    days = _wtol(ptr);
+            }
         }
-        else if (_wcsicmp(L"TYPE", name) == 0 && type == NULL) {
+        else if (_wcsicmp(L"DAYS", name) == 0) {
+            if (days != 0) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
+            days = _wtol(value);
+        }
+        else if (_wcsicmp(L"TYPE", name) == 0) {
             // TYPE-LEVEL
+            if (type != NULL) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
             WCHAR* ptr = wcschr(value, L'-');
             if (ptr != NULL) {
                 *ptr++ = L'\0';
-                if(level == NULL) level = Mem_AllocString(Driver_Pool, ptr);
+                level = Mem_AllocString(Driver_Pool, ptr);
             }
             type = Mem_AllocString(Driver_Pool, value);
         }
-        else if (_wcsicmp(L"LEVEL", name) == 0 && level == NULL) {
+        else if (_wcsicmp(L"LEVEL", name) == 0) {
+            if (level != NULL) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
             level = Mem_AllocString(Driver_Pool, value);
         }
-        //else if (_wcsicmp(L"UPDATEKEY", name) == 0 && key == NULL) {
-        //    key = Mem_AllocString(Driver_Pool, value);
-        //}
+        else if (_wcsicmp(L"OPTIONS", name) == 0) {
+            if (options != NULL) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
+            options = Mem_AllocString(Driver_Pool, value);
+        }
+        else if (_wcsicmp(L"UPDATEKEY", name) == 0) {
+            if (key != NULL) {
+                status = STATUS_BAD_FUNCTION_TABLE;
+                goto CleanupExit;
+            }
+            key = Mem_AllocString(Driver_Pool, value);
+        }
+        else if (_wcsicmp(L"AMOUNT", name) == 0) {
+            amount = _wtol(value);
+        }
         else if (_wcsicmp(L"SOFTWARE", name) == 0) { // if software is specified it must be the right one
             if (_wcsicmp(value, SOFTWARE_NAME) != 0) {
                 status = STATUS_OBJECT_TYPE_MISMATCH;
+                goto CleanupExit;
+            }
+        }
+        else if (_wcsicmp(L"HWID", name) == 0) { // if HwId is specified it must be the right one
+            extern wchar_t g_uuid_str[40];
+            if (_wcsicmp(value, g_uuid_str) != 0) {
+                status = STATUS_FIRMWARE_IMAGE_INVALID;
                 goto CleanupExit;
             }
         }
@@ -673,9 +752,6 @@ _FX NTSTATUS KphValidateCertificate(void)
     next:
         status = Conf_Read_Line(stream, line, &line_num);
     }
-
-    Stream_Close(stream);
-    
 
     if(!NT_SUCCESS(status = MyFinishHash(&hashObj, &hash, &hashSize)))
         goto CleanupExit;
@@ -687,9 +763,52 @@ _FX NTSTATUS KphValidateCertificate(void)
 
     status = KphVerifySignature(hash, hashSize, signature, signatureSize);
 
+    if (NT_SUCCESS(status) && key) {
+
+        ULONG key_len = wcslen(key);
+
+        ULONG blocklist_len = 0x4000;
+        CHAR* blocklist = Mem_Alloc(Driver_Pool, blocklist_len);
+        ULONG blocklist_size = 0;
+
+        API_SECURE_PARAM_ARGS args;
+        args.param_name.val = L"CertBlockList";
+        args.param_data.val = blocklist;
+        args.param_size.val = blocklist_len - 1;
+        args.param_size_out.val = &blocklist_size;
+        args.param_verify.val = TRUE;
+
+        if (NT_SUCCESS(Api_GetSecureParam(NULL, (ULONG64*)&args)) && blocklist_size > 0)
+        {
+            blocklist[blocklist_size] = 0;
+            CHAR *blocklist_end = blocklist + strlen(blocklist);
+            for (CHAR *end, *start = blocklist; start < blocklist_end; start = end + 1)
+            {
+                end = strchr(start, '\n');
+                if (!end) end = blocklist_end;
+
+                SIZE_T len = end - start;
+                if (len > 1 && start[len - 1] == '\r') len--;
+                
+                if (len > 0) {
+                    ULONG i = 0;
+                    for (; i < key_len && i < len && start[i] == key[i]; i++); // cmp CHAR vs. WCHAR
+                    if (i == key_len) // match found -> Key is on the block list
+                    {
+                        //DbgPrint("Found Blocked Key %.*s\n", start, len);
+                        status = STATUS_CONTENT_BLOCKED;
+                        break;
+                    }
+                }
+            }
+        }
+
+        Mem_Free(blocklist, blocklist_len);
+    }
+
     if (NT_SUCCESS(status)) {
 
-        Verify_CertInfo.valid = 1;
+        Verify_CertInfo.active = 1;
 
         if(CertDbg) DbgPrint("Sbie Cert type: %S-%S\n", type, level);
 
@@ -722,89 +841,176 @@ _FX NTSTATUS KphValidateCertificate(void)
             level = NULL;
         }
 
-        // Checks if the certificate is within its validity period, otherwise it has no effect except for UI notification
-#define TEST_CERT_DATE(days, months, years) \
-            if ((cert_date.QuadPart + KphGetDateInterval(days, months, years)) < LocalTime.QuadPart){ \
-                Verify_CertInfo.expired = 1; \
-            } \
-            Verify_CertInfo.expirers_in_sec = (ULONG)(((cert_date.QuadPart + KphGetDateInterval(days, months, years)) - LocalTime.QuadPart) / 10000000ll); // 100ns steps -> 1sec
+        LARGE_INTEGER expiration_date = { 0 };
 
-        // certs with a validity >= 3 months get 1 extra month of functionality
-#define TEST_GRACE_PERIODE(days, months, years) \
-                if (months >= 3 || years > 0){ \
-                    if ((cert_date.QuadPart + KphGetDateInterval(days, months + 1, years)) >= LocalTime.QuadPart) \
-                        Verify_CertInfo.grace_period = 1; \
-                } \
-
-        // Check if the certificate is valid for the current build, failing this locks features out
-#define TEST_VALIDITY(days, months, years) \
-            TEST_CERT_DATE(days, months, years) \
-            if ((cert_date.QuadPart + KphGetDateInterval(days, months, years)) < BuildDate.QuadPart){ \
-                Verify_CertInfo.outdated = 1; \
-                TEST_GRACE_PERIODE(days, months, years) \
-                if(!Verify_CertInfo.grace_period){ \
-                    Verify_CertInfo.valid = 0; \
-                    status = STATUS_ACCOUNT_EXPIRED; \
-                } \
-            }
-
-        // Check if the certificate is expired, failing this locks features out
-#define TEST_EXPIRATION(days, months, years) \
-            TEST_CERT_DATE(days, months, years) \
-            if(Verify_CertInfo.expired == 1) { \
-                TEST_GRACE_PERIODE(days, months, years) \
-                if(!Verify_CertInfo.grace_period){ \
-                    Verify_CertInfo.valid = 0; \
-                    status = STATUS_ACCOUNT_EXPIRED; \
-                } \
-            }
-
-
-        if (type && _wcsicmp(type, L"CONTRIBUTOR") == 0) {
-            // forever - nothing to check here
+        if (!type) // type is mandatory 
+            ;
+        else if (_wcsicmp(type, L"CONTRIBUTOR") == 0)
+            Verify_CertInfo.type = eCertContributor;
+        else if (_wcsicmp(type, L"ETERNAL") == 0)
+            Verify_CertInfo.type = eCertEternal;
+        else if (_wcsicmp(type, L"BUSINESS") == 0)
+            Verify_CertInfo.type = eCertBusiness;
+        else if (_wcsicmp(type, L"EVALUATION") == 0 || _wcsicmp(type, L"TEST") == 0)
+            Verify_CertInfo.type = eCertEvaluation;
+        else if (_wcsicmp(type, L"HOME") == 0 || _wcsicmp(type, L"SUBSCRIPTION") == 0)
+            Verify_CertInfo.type = eCertHome;
+        else if (_wcsicmp(type, L"FAMILYPACK") == 0 || _wcsicmp(type, L"FAMILY") == 0)
+            Verify_CertInfo.type = eCertFamily;
+        // patreon >>>
+        else if (wcsstr(type, L"PATREON") != NULL) // TYPE: [CLASS]_PATREON-[LEVEL]
+        {    
+            if(_wcsnicmp(type, L"GREAT", 5) == 0)
+                Verify_CertInfo.type = eCertGreatPatreon;
+            else if (_wcsnicmp(type, L"ENTRY", 5) == 0) { // new patreons get only 3 montgs for start
+                Verify_CertInfo.type = eCertEntryPatreon;
+                expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval(0, 3, 0);
+            } else
+                Verify_CertInfo.type = eCertPatreon;
+            
         }
-        else if (type && _wcsicmp(type, L"BUSINESS") == 0) {
-            Verify_CertInfo.business = 1;
-            if (level) { // in months
-                TEST_EXPIRATION(0, (CSHORT)_wtoi(level), 0);
+        // <<< patreon 
+        else //if (_wcsicmp(type, L"PERSONAL") == 0 || _wcsicmp(type, L"SUPPORTER") == 0)
+        {
+            Verify_CertInfo.type = eCertPersonal;
+        }
+
+        if(CertDbg)     DbgPrint("Sbie Cert type: %X\n", Verify_CertInfo.type);
+
+        if (CERT_IS_TYPE(Verify_CertInfo, eCertEternal))
+            Verify_CertInfo.level = eCertMaxLevel;
+        else if (CERT_IS_TYPE(Verify_CertInfo, eCertEvaluation)) // in evaluation the level field holds the amount of days to allow evaluation for
+        {
+            if(days) expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval((CSHORT)(days), 0, 0);
+            else expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval((CSHORT)(level ? _wtoi(level) : 7), 0, 0); // x days, default 7
+            Verify_CertInfo.level = eCertMaxLevel;
+        }
+        else if (!level || _wcsicmp(level, L"STANDARD") == 0) // not used, default does not have explicit level
+            Verify_CertInfo.level = eCertStandard;
+        else if (_wcsicmp(level, L"ADVANCED") == 0)
+        {
+            if(Verify_CertInfo.type == eCertGreatPatreon)
+                Verify_CertInfo.level = eCertMaxLevel;
+            else if(Verify_CertInfo.type == eCertPatreon || Verify_CertInfo.type == eCertEntryPatreon)
+                Verify_CertInfo.level = eCertAdvanced1;
+            else
+                Verify_CertInfo.level = eCertAdvanced;
+        }
+        // scheme 1.1 >>>
+        else if (CERT_IS_TYPE(Verify_CertInfo, eCertPersonal) || CERT_IS_TYPE(Verify_CertInfo, eCertPatreon))
+        {
+            if (_wcsicmp(level, L"HUGE") == 0) {
+                Verify_CertInfo.type = eCertEternal;
+                Verify_CertInfo.level = eCertMaxLevel;
             }
-            else { // 1 year default
-                TEST_EXPIRATION(0, 0, 1);
+            else if (_wcsicmp(level, L"LARGE") == 0 && cert_date.QuadPart < KphGetDate(1, 04, 2022)) { // initial batch of semi perpetual large certs
+                Verify_CertInfo.level = eCertAdvanced1;
+                expiration_date.QuadPart = -2;
+            }
+            // todo: 01.09.2025: remove code for expired case LARGE
+            else if (_wcsicmp(level, L"LARGE") == 0) { // 2 years - personal
+                if(CERT_IS_TYPE(Verify_CertInfo, eCertPatreon))
+                    Verify_CertInfo.level = eCertStandard2;
+                else
+                    Verify_CertInfo.level = eCertAdvanced;
+                expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval(0, 0, 2); // 2 years
+            }
+            // todo: 01.09.2024: remove code for expired case MEDIUM
+            else if (_wcsicmp(level, L"MEDIUM") == 0) { // 1 year - personal
+                Verify_CertInfo.level = eCertStandard2;
+            }
+            // todo: 01.09.2024: remove code for expired case SMALL
+            else if (_wcsicmp(level, L"SMALL") == 0) { // 1 year - subscription
+                Verify_CertInfo.level = eCertStandard2;
+                Verify_CertInfo.type = eCertHome;
+            }
+            else
+                Verify_CertInfo.level = eCertStandard;
+        }
+        // <<< scheme 1.1
+        
+        if(CertDbg)     DbgPrint("Sbie Cert level: %X\n", Verify_CertInfo.level);
+
+        if (options) {
+
+             if(CertDbg)     DbgPrint("Sbie Cert options: %S\n", options);
+
+             for (WCHAR* option = options; ; )
+             {
+                 while (*option == L' ' || *option == L'\t') option++;
+                 WCHAR* end = wcschr(option, L',');
+                 if (!end) end = wcschr(option, L'\0');
+
+                 //if (CertDbg)   DbgPrint("Sbie Cert option: %.*S\n", end - option, option);
+
+                 if (_wcsnicmp(L"SBOX", option, end - option) == 0)
+                     Verify_CertInfo.opt_sec = 1;
+                 else if (_wcsnicmp(L"EBOX", option, end - option) == 0)
+                     Verify_CertInfo.opt_enc = 1;
+                 else if (_wcsnicmp(L"NETI", option, end - option) == 0)
+                     Verify_CertInfo.opt_net = 1;
+                 else if (_wcsnicmp(L"DESK", option, end - option) == 0)
+                     Verify_CertInfo.opt_desk = 1;
+                 else if (CertDbg)   DbgPrint("Sbie Cert UNKNOWN option: %.*S\n", (ULONG)(end - option), option);
+
+                 if (*end == L'\0')
+                     break;
+                 option = end + 1;
+             }
+        }
+        else {
+
+            switch (Verify_CertInfo.level)
+            {
+                case eCertMaxLevel:
+                //case eCertUltimate:
+                    Verify_CertInfo.opt_desk = 1;
+                case eCertAdvanced:
+                    Verify_CertInfo.opt_net = 1;
+                case eCertAdvanced1:
+                    Verify_CertInfo.opt_enc = 1;
+                case eCertStandard2:
+                case eCertStandard:
+                    Verify_CertInfo.opt_sec = 1;
+                //case eCertBasic:
             }
         }
-        else if (type && _wcsicmp(type, L"EVALUATION") == 0) {
-            Verify_CertInfo.evaluation = 1;
-            // evaluation
-            if (level) { // in days
-                TEST_EXPIRATION((CSHORT)_wtoi(level), 0, 0);
-            }
-            else { // 5 days default
-                TEST_EXPIRATION(5, 0, 0);
-            }
+
+        if (CERT_IS_TYPE(Verify_CertInfo, eCertEternal))
+            expiration_date.QuadPart = -1; // at the end of time (never)
+        else if (!expiration_date.QuadPart) {
+            if (days) expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval((CSHORT)(days), 0, 0);
+            else expiration_date.QuadPart = cert_date.QuadPart + KphGetDateInterval(0, 0, 1); // default 1 year, unless set differently already
         }
-        else /*if (!type || _wcsicmp(type, L"PERSONAL") == 0 || _wcsicmp(type, L"PATREON") == 0 || _wcsicmp(type, L"SUPPORTER") == 0) */ {
-            // persistent
-            if (level && _wcsicmp(level, L"HUGE") == 0) {
-                // 
-            } 
-            else if (level && _wcsicmp(level, L"LARGE") == 0 && cert_date.QuadPart < KphGetDate(1,04,2022)) { // valid for all builds released with 2 years
-                TEST_CERT_DATE(0, 0, 2); // no real expiration just ui reminder - old certs
+
+        // check if this is a subscription type certificate
+        BOOLEAN isSubscription = CERT_IS_SUBSCRIPTION(Verify_CertInfo);
+
+        if (expiration_date.QuadPart == -2)
+            Verify_CertInfo.expired = 1; // but not outdated
+        else if (expiration_date.QuadPart != -1) 
+        {
+            // check if this certificate is expired
+            if (expiration_date.QuadPart < LocalTime.QuadPart)
+                Verify_CertInfo.expired = 1;
+            Verify_CertInfo.expirers_in_sec = (ULONG)((expiration_date.QuadPart - LocalTime.QuadPart) / 10000000ll); // 100ns steps -> 1sec
+
+            // check if a non subscription type certificate is valid for the current build
+            if (!isSubscription && expiration_date.QuadPart < BuildDate.QuadPart)
+                Verify_CertInfo.outdated = 1;
+        }
+
+        // check if the certificate is valid
+        if (isSubscription ? Verify_CertInfo.expired : Verify_CertInfo.outdated) 
+        {
+            if (!CERT_IS_TYPE(Verify_CertInfo, eCertEvaluation)) { // non eval certs get 1 month extra
+                if (expiration_date.QuadPart + KphGetDateInterval(0, 1, 0) >= LocalTime.QuadPart)
+                    Verify_CertInfo.grace_period = 1;
             }
-            else if (level && _wcsicmp(level, L"LARGE") == 0) { // valid for all builds released with 2 years
-                TEST_VALIDITY(0, 0, 2);
-            }
-            else if (level && _wcsicmp(level, L"MEDIUM") == 0) { // valid for all builds released with 1 year 
-                TEST_VALIDITY(0, 0, 1);
-            }
-            // subscriptions
-            else if (level && _wcsicmp(level, L"TEST") == 0) { // test certificate 5 days only
-                TEST_EXPIRATION(5, 0, 0);
-            }
-            else if (level && _wcsicmp(level, L"ENTRY") == 0) { // patreon entry level, first 3 months, later longer
-                TEST_EXPIRATION(0, 3, 0);
-            }
-            else /*if (!level || _wcsicmp(level, L"SMALL") == 0)*/ { // valid for 1 year
-                TEST_EXPIRATION(0, 0, 1);
+
+            if (!Verify_CertInfo.grace_period) {
+                Verify_CertInfo.active = 0;
+                status = STATUS_ACCOUNT_EXPIRED;
             }
         }
     }
@@ -819,11 +1025,167 @@ CleanupExit:
 
     if (type)       Mem_FreeString(type);
     if (level)      Mem_FreeString(level);
-    //if (key)        Mem_FreeString(key);
+    if (options)    Mem_FreeString(options);
+    if (key)        Mem_FreeString(key);
 
                     MyFreeHash(&hashObj);
     if(hash)        ExFreePoolWithTag(hash, 'vhpK');
     if(signature)   Mem_Free(signature, signatureSize);
 
+    if(stream)      Stream_Close(stream);
+
     return status;
+}
+
+
+//---------------------------------------------------------------------------
+
+
+// SMBIOS Structure header as described at
+// see https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.3.0.pdf (para 6.1.2)
+typedef struct _dmi_header
+{
+  UCHAR type;
+  UCHAR length;
+  USHORT handle;
+  UCHAR data[1];
+} dmi_header;
+
+// Structure needed to get the SMBIOS table using GetSystemFirmwareTable API.
+// see https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemfirmwaretable
+typedef struct _RawSMBIOSData {
+  UCHAR  Used20CallingMethod;
+  UCHAR  SMBIOSMajorVersion;
+  UCHAR  SMBIOSMinorVersion;
+  UCHAR  DmiRevision;
+  DWORD  Length;
+  UCHAR  SMBIOSTableData[1];
+} RawSMBIOSData;
+
+#define SystemFirmwareTableInformation 76 
+
+BOOLEAN GetFwUuid(unsigned char* uuid)
+{
+    BOOLEAN result = FALSE;
+
+    SYSTEM_FIRMWARE_TABLE_INFORMATION sfti;
+    sfti.Action = SystemFirmwareTable_Get;
+    sfti.ProviderSignature = 'RSMB';
+    sfti.TableID = 0;
+    sfti.TableBufferLength = 0;
+
+    ULONG Length = sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION);
+    NTSTATUS status = ZwQuerySystemInformation(SystemFirmwareTableInformation, &sfti, Length, &Length);
+    if (status != STATUS_BUFFER_TOO_SMALL)
+        return result;
+
+    ULONG BufferSize = sfti.TableBufferLength;
+
+    Length = BufferSize + sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION);
+    SYSTEM_FIRMWARE_TABLE_INFORMATION* pSfti = ExAllocatePoolWithTag(PagedPool, Length, 'vhpK');
+    if (!pSfti)
+        return result;
+    *pSfti = sfti;
+    pSfti->TableBufferLength = BufferSize;
+
+    status = ZwQuerySystemInformation(SystemFirmwareTableInformation, pSfti, Length, &Length);
+    if (NT_SUCCESS(status)) 
+    {
+        RawSMBIOSData* smb = (RawSMBIOSData*)pSfti->TableBuffer;
+
+        for (UCHAR* data = smb->SMBIOSTableData; data < smb->SMBIOSTableData + smb->Length;)
+        {
+            dmi_header* h = (dmi_header*)data;
+            if (h->length < 4)
+                break;
+
+            //Search for System Information structure with type 0x01 (see para 7.2)
+            if (h->type == 0x01 && h->length >= 0x19)
+            {
+                data += 0x08; //UUID is at offset 0x08
+
+                // check if there is a valid UUID (not all 0x00 or all 0xff)
+                BOOLEAN all_zero = TRUE, all_one = TRUE;
+                for (int i = 0; i < 16 && (all_zero || all_one); i++)
+                {
+                    if (data[i] != 0x00) all_zero = FALSE;
+                    if (data[i] != 0xFF) all_one = FALSE;
+                }
+
+                if (!all_zero && !all_one)
+                {
+                    // As off version 2.6 of the SMBIOS specification, the first 3 fields
+                    // of the UUID are supposed to be encoded on little-endian. (para 7.2.1)
+                    *uuid++ = data[3];
+                    *uuid++ = data[2];
+                    *uuid++ = data[1];
+                    *uuid++ = data[0];
+                    *uuid++ = data[5];
+                    *uuid++ = data[4];
+                    *uuid++ = data[7];
+                    *uuid++ = data[6];
+                    for (int i = 8; i < 16; i++)
+                        *uuid++ = data[i];
+
+                    result = TRUE;
+                }
+
+                break;
+            }
+
+            //skip over formatted area
+            UCHAR* next = data + h->length;
+
+            //skip over unformatted area of the structure (marker is 0000h)
+            while (next < smb->SMBIOSTableData + smb->Length && (next[0] != 0 || next[1] != 0))
+                next++;
+
+            next += 2;
+
+            data = next;
+        }
+    }
+
+    ExFreePoolWithTag(pSfti, 'vhpK');
+
+    return result;
+}
+
+wchar_t* hexbyte(UCHAR b, wchar_t* ptr)
+{
+    static const wchar_t* digits = L"0123456789ABCDEF";
+    *ptr++ = digits[b >> 4];
+    *ptr++ = digits[b & 0x0f];
+    return ptr;
+}
+
+wchar_t g_uuid_str[40] = { 0 };
+
+void InitFwUuid()
+{
+    UCHAR uuid[16];
+    if (GetFwUuid(uuid))
+    {
+        wchar_t* ptr = g_uuid_str;
+        int i;
+        for (i = 0; i < 4; i++)
+            ptr = hexbyte(uuid[i], ptr);
+        *ptr++ = '-';
+        for (; i < 6; i++)
+            ptr = hexbyte(uuid[i], ptr);
+        *ptr++ = '-';
+        for (; i < 8; i++)
+            ptr = hexbyte(uuid[i], ptr);
+        *ptr++ = '-';
+        for (; i < 10; i++)
+            ptr = hexbyte(uuid[i], ptr);
+        *ptr++ = '-';
+        for (; i < 16; i++)
+            ptr = hexbyte(uuid[i], ptr);
+        *ptr++ = 0;
+    }
+    else // fallback to null guid on error
+        wcscpy(g_uuid_str, L"00000000-0000-0000-0000-000000000000");
+    
+    DbgPrint("sbie FW-UUID: %S\n", g_uuid_str);
 }

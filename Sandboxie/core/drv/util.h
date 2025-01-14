@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2023 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -90,8 +90,16 @@ BOOLEAN UnicodeStringStartsWith(PCUNICODE_STRING pString1, PWCHAR pString2, BOOL
 BOOLEAN UnicodeStringEndsWith(PCUNICODE_STRING pString1, PWCHAR pString2, BOOLEAN boolCaseInSensitive);
 BOOLEAN DoesRegValueExist(ULONG RelativeTo, WCHAR *Path, WCHAR *ValueName);
 NTSTATUS GetRegString(ULONG RelativeTo, const WCHAR *Path, const WCHAR *ValueName, UNICODE_STRING* pData);
+ULONG GetRegDword(const WCHAR *KeyPath, const WCHAR *ValueName);
+NTSTATUS SetRegValue(const WCHAR *KeyPath, const WCHAR *ValueName, const void *Data, ULONG uSize);
+NTSTATUS GetRegValue(const WCHAR *KeyPath, const WCHAR *ValueName, PVOID* pData, ULONG* pSize);
 void *memmem(const void *pSearchBuf, size_t nBufSize, const void *pPattern, size_t nPatternSize);
 
+//
+// return TRUE if the system accepts self signed drivers
+//
+
+BOOLEAN MyIsTestSigning(void);
 
 
 //
@@ -101,6 +109,10 @@ void *memmem(const void *pSearchBuf, size_t nBufSize, const void *pPattern, size
 BOOLEAN MyIsCallerSigned(void);
 
 
+//
+// Validate supporter certificate
+//
+
 NTSTATUS MyValidateCertificate(void);
 
 //
@@ -109,6 +121,9 @@ NTSTATUS MyValidateCertificate(void);
 
 HANDLE Util_GetProcessPidByName(const WCHAR* name);
 
+BOOLEAN Util_IsSystemProcess(HANDLE pid, const char* name);
+
+BOOLEAN Util_IsProtectedProcess(HANDLE pid);
 
 LARGE_INTEGER Util_GetTimestamp(void);
 
@@ -123,7 +138,5 @@ ULONG Util_CaptureStack(_Out_ PVOID* Frames, _In_ ULONG Count);
 
 //---------------------------------------------------------------------------
 
-
-extern BOOLEAN Driver_Certified;
 
 #endif // _MY_UTIL_H

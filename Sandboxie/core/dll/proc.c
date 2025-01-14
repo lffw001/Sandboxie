@@ -737,14 +737,14 @@ _FX BOOL Proc_CreateAppContainerToken(
 
 
 //---------------------------------------------------------------------------
-// Proc_FindArgumentEnd
+// SbieDll_FindArgumentEnd
 //---------------------------------------------------------------------------
 
 
-_FX const WCHAR* Proc_FindArgumentEnd(const WCHAR* arguments)
+_FX const WCHAR* SbieDll_FindArgumentEnd(const WCHAR* arguments)
 {
     //
-    // when suplying: "aaaa \"bb cc\"ddd\"e\\"f\" gg hh \\"ii \"jjjj kkkk"
+    // when supplying: "aaaa \"bb cc\"ddd\"e\\"f\" gg hh \\"ii \"jjjj kkkk"
     // to an application for (int i = 0; i < argc; i++) printf("%s\n", argv[i]); gives:
     // "aaaa", "bb ccddde\"f", "gg", "hh", "\"ii", "jjjj kkkk"
     // here we exactly replicate this parsing scheme
@@ -908,7 +908,7 @@ _FX BOOL Proc_CreateProcessInternalW(
         // architecture which conflicts with our restricted process model
         //
 
-        if (Dll_ImageType == DLL_IMAGE_FLASH_PLAYER_SANDBOX ||
+        if (//Dll_ImageType == DLL_IMAGE_FLASH_PLAYER_SANDBOX ||
             Dll_ImageType == DLL_IMAGE_ACROBAT_READER ||
             Dll_ImageType == DLL_IMAGE_PLUGIN_CONTAINER)
             hToken = NULL;
@@ -1206,7 +1206,7 @@ _FX BOOL Proc_CreateProcessInternalW(
                 
                 const WCHAR* lpArguments = NULL;
                 if (lpCommandLine)
-                    lpArguments = Proc_FindArgumentEnd(lpCommandLine);
+                    lpArguments = SbieDll_FindArgumentEnd(lpCommandLine);
 
                 WCHAR *mybuf = Dll_Alloc((wcslen(lpApplicationName) + 2 + (lpArguments ? wcslen(lpArguments) + 8192 : 0) + 1) * sizeof(WCHAR));
                 if (mybuf) {
@@ -1232,7 +1232,7 @@ _FX BOOL Proc_CreateProcessInternalW(
                         WCHAR* temp = Dll_Alloc(sizeof(WCHAR) * 8192);
 
                         for (const WCHAR* ptr = lpArguments; *ptr != L'\0';) {
-                            WCHAR* end = (WCHAR*)Proc_FindArgumentEnd(ptr);
+                            WCHAR* end = (WCHAR*)SbieDll_FindArgumentEnd(ptr);
                             ULONG len = (ULONG)(end - ptr);
                             if (len > 0) {
                                 WCHAR savechar = *end;
@@ -1307,6 +1307,31 @@ _FX BOOL Proc_CreateProcessInternalW(
             }
         }
     }
+
+    //
+    // Explorer does not use ShellExecuteExW, so for explorer we set BreakoutDocumentProcess=explorer.exe,y 
+    // in the Templates.ini and check whenever explorer wants to start a process
+    //
+
+    if (lpCommandLine && Config_GetSettingsForImageName_bool(L"BreakoutDocumentProcess", FALSE))
+    {
+        const WCHAR* temp = lpCommandLine;
+        if (*temp == L'"') temp = wcschr(temp + 1, L'"');
+        else temp = wcschr(temp, L' ');
+        if (temp) 
+        {
+            while (*++temp == L' ');
+
+            const WCHAR* arg1 = temp;
+            const WCHAR* arg1_end = NULL;
+            if (*arg1 == L'"') temp = wcschr(arg1 + 1, L'"');
+            if (!arg1_end) arg1_end = wcschr(arg1, L'\0');
+
+            if (arg1 && arg1 != arg1_end && SH32_BreakoutDocument(arg1, (ULONG)(arg1_end - arg1)))
+                return TRUE;
+        }
+    }
+
 #endif
 
     //
@@ -1335,11 +1360,15 @@ _FX BOOL Proc_CreateProcessInternalW(
 		    lpProcessAttributes = NULL;
         }
 
+        TlsData->proc_create_process_fake_admin = (Secure_FakeAdmin == FALSE && SbieApi_QueryConfBool(NULL, L"FakeAdminRights", FALSE));
+
         ok = __sys_CreateProcessInternalW(
             hToken, lpApplicationName, lpCommandLine,
             lpProcessAttributes, lpThreadAttributes, bInheritHandles,
             dwCreationFlags, lpEnvironment, lpCurrentDirectory,
             lpStartupInfo, lpProcessInformation, hNewToken);
+
+        TlsData->proc_create_process_fake_admin = FALSE;
 
         err = GetLastError();
 
@@ -1410,6 +1439,7 @@ _FX BOOL Proc_CreateProcessInternalW(
         }
     }
 
+    TlsData->proc_create_process_fake_admin = (Secure_FakeAdmin == FALSE && SbieApi_QueryConfBool(NULL, L"FakeAdminRights", FALSE));
 
     ok = __sys_CreateProcessInternalW(
         NULL, lpApplicationName, lpCommandLine,
@@ -1419,6 +1449,7 @@ _FX BOOL Proc_CreateProcessInternalW(
 
     err = GetLastError();
 
+    TlsData->proc_create_process_fake_admin = FALSE;
 
     //
     // restore the original owner pointers in the security descriptors
@@ -1647,14 +1678,15 @@ _FX BOOL Proc_AlternateCreateProcess(
     void *lpCurrentDirectory, LPPROCESS_INFORMATION lpProcessInformation,
     BOOL *ReturnValue)
 {
-    //if (SbieApi_QueryConfBool(NULL, L"BlockSoftwareUpdaters", TRUE))
-    if (Proc_IsSoftwareUpdateW(lpApplicationName ? lpApplicationName : lpCommandLine)) {
+    if (SbieApi_QueryConfBool(NULL, L"BlockSoftwareUpdaters", TRUE)) {
+        if (Proc_IsSoftwareUpdateW(lpApplicationName ? lpApplicationName : lpCommandLine)) {
 
-        SetLastError(ERROR_ACCESS_DENIED);
-        *ReturnValue = FALSE;
+            SetLastError(ERROR_ACCESS_DENIED);
+            *ReturnValue = FALSE;
 
-        SbieApi_MonitorPutMsg(MONITOR_OTHER, L"Blocked start of an updater");
-        return TRUE;        // exit CreateProcessInternal
+            SbieApi_MonitorPutMsg(MONITOR_OTHER, L"Blocked start of an updater");
+            return TRUE;        // exit CreateProcessInternal
+        }
     }
 
 #ifndef _WIN64
@@ -2271,7 +2303,14 @@ _FX NTSTATUS Proc_NtCreateUserProcess(
 
                 if (TlsData->proc_image_path && ProcessParameters && ProcessParameters->CommandLine.Buffer) {
 
-                    Proc_FixBatchCommandLine(TlsData, ProcessParameters->CommandLine.Buffer, TlsData->proc_image_path);
+                    //Proc_FixBatchCommandLine(TlsData, ProcessParameters->CommandLine.Buffer, TlsData->proc_image_path);
+
+                    WCHAR *cmd = Dll_Alloc(ProcessParameters->CommandLine.Length + sizeof(WCHAR));
+                    wcscpy(cmd, ProcessParameters->CommandLine.Buffer);
+
+                    if (TlsData->proc_command_line)
+                        Dll_Free(TlsData->proc_command_line);
+                    TlsData->proc_command_line = cmd;
                 }
 
                 NtClose(FileHandle);
@@ -2391,7 +2430,7 @@ _FX BOOLEAN SbieDll_RunFromHome(
 
     len = MAX_PATH * 2 + wcslen(pgmName);
     if (pgmArgs)
-        len += wcslen(pgmArgs);
+        len += 1 + wcslen(pgmArgs);
     path = Dll_AllocTemp(len * sizeof(WCHAR));
 
     ptr = wcsrchr(pgmName, L'.');

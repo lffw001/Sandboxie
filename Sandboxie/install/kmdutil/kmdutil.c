@@ -30,6 +30,8 @@
 
 extern void Kmd_ScanDll(BOOLEAN silent);
 
+extern BOOL Kmd_FixDacls();
+
 
 //---------------------------------------------------------------------------
 // Defines
@@ -43,7 +45,8 @@ typedef enum _COMMAND {
     CMD_STOP,
     CMD_SCANDLL,
     CMD_SCANDLL_SILENT,
-    CMD_MESSAGE
+    CMD_MESSAGE,
+    CMD_FIXDACLS
 } COMMAND;
 
 typedef enum _OPTIONS {
@@ -223,6 +226,10 @@ BOOL Parse_Command_Line(
     } else if (_wcsicmp(args[1], L"message") == 0) {
         *Command = CMD_MESSAGE;
         num_args_needed = 2;
+
+    } else if (_wcsicmp(args[1], L"fixdacls") == 0) {
+        *Command = CMD_FIXDACLS;
+        num_args_needed = 0;
 
     } else {
         *Command = CMD_ERROR;
@@ -520,10 +527,10 @@ BOOL Kmd_Register_MiniFilter(
         return FALSE;
 
     retcode = RegSetValueEx(
-        driver_key, L"DependsOnService", 0, REG_MULTI_SZ,
+        driver_key, L"DependOnService", 0, REG_MULTI_SZ,
         (BYTE *)L"FltMgr\0\0", 8 * sizeof(WCHAR));
     if (retcode != 0) {
-        Display_Error(L"RegSetValueEx (DependsOnService)", retcode);
+        Display_Error(L"RegSetValueEx (DependOnService)", retcode);
         return FALSE;
     }
 
@@ -761,6 +768,16 @@ int __stdcall WinMain(
             &Options))
         return EXIT_FAILURE;
 
+    if (Command == CMD_MESSAGE) {
+        ok = Kmd_Show_Message(Driver_Name, Driver_Path);
+        goto finish;
+    }
+
+    if (Command == CMD_FIXDACLS) {
+        ok = Kmd_FixDacls();
+        goto finish;
+    }
+
     ScMgr = OpenSCManager(
         NULL, SERVICES_ACTIVE_DATABASE, SC_MANAGER_CREATE_SERVICE);
 
@@ -803,9 +820,7 @@ int __stdcall WinMain(
     if (Command == CMD_STOP)
         ok = Kmd_Stop_Service(Driver_Name);
 
-    if (Command == CMD_MESSAGE)
-        ok = Kmd_Show_Message(Driver_Name, Driver_Path);
-
+finish:
     if (! ok)
         return EXIT_FAILURE;
 

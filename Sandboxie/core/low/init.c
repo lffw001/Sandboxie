@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2022 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -50,14 +50,13 @@ typedef long NTSTATUS;
 #else
 #define GET_ADDR_OF_PEB __readgsqword(0x60)
 #endif
-#define GET_ADDR_OF_PROCESS_HEAP ((ULONG_PTR *)(GET_ADDR_OF_PEB + 0x30))
-
+//#define GET_ADDR_OF_PROCESS_HEAP ((ULONG_PTR *)(GET_ADDR_OF_PEB + 0x30))
 
 #else ! _WIN64
 
 // Pointer to 32-bit ProcessHeap is at offset 0x0018 of 32-bit PEB
 #define GET_ADDR_OF_PEB __readfsdword(0x30)
-#define GET_ADDR_OF_PROCESS_HEAP ((ULONG_PTR *)(GET_ADDR_OF_PEB + 0x18))
+//#define GET_ADDR_OF_PROCESS_HEAP ((ULONG_PTR *)(GET_ADDR_OF_PEB + 0x18))
 
 #endif _WIN64
 
@@ -148,11 +147,11 @@ _FX NTSTATUS SbieApi_Ioctl(SBIELOW_DATA *data, void *parms)
 
 
 //---------------------------------------------------------------------------
-// SbieApi_DebugPrint
+// SbieApi_LogMsg
 //---------------------------------------------------------------------------
 
 
-_FX NTSTATUS SbieApi_DebugPrint(SBIELOW_DATA *data, const WCHAR *text)
+_FX NTSTATUS SbieApi_LogMsg(ULONG64 pNtDeviceIoControlFile, ULONG64 api_device_handle, ULONG code, const WCHAR *text)
 {
     NTSTATUS status = 0;
     __declspec(align(8)) UNICODE_STRING64 msgtext;
@@ -170,9 +169,18 @@ _FX NTSTATUS SbieApi_DebugPrint(SBIELOW_DATA *data, const WCHAR *text)
     memzero(parms, sizeof(parms));
     args->func_code = API_LOG_MESSAGE;
     args->session_id.val = -1;
-    args->msgid.val = 1122;
+    args->msgid.val = code;
     args->msgtext.val = &msgtext;
-    status = SbieApi_Ioctl(data, parms);
+    //status = SbieApi_Ioctl(data, parms);
+
+    IO_STATUS_BLOCK MyIoStatusBlock;
+#ifdef _WIN64
+    ULONG MyIoStatusBlock32[2];
+    *(ULONG_PTR *)&MyIoStatusBlock = (ULONG_PTR)MyIoStatusBlock32;
+#endif _WIN64
+    return ((P_NtDeviceIoControlFile)pNtDeviceIoControlFile)(
+        (HANDLE)api_device_handle, NULL, NULL, NULL, &MyIoStatusBlock,
+        API_SBIEDRV_CTLCODE, parms, sizeof(ULONG64) * 8, NULL, 0);
 
     return status;
 }
@@ -185,7 +193,7 @@ _FX NTSTATUS SbieApi_DebugPrint(SBIELOW_DATA *data, const WCHAR *text)
 
 _FX NTSTATUS SbieApi_DebugError(SBIELOW_DATA* data, ULONG error)
 {
-    // Note: A normal string like L"text" would not resultin position independent code !!!
+    // Note: A normal string like L"text" would not result in position independent code !!!
     // hence we create a string array and fill it byte by byte
 
     wchar_t text[] = { 'L','o','w','L','e','v','e','l',' ','E','r','r','o','r',':',' ','0','x',0,0,0,0,0,0,0,0,0,0};
@@ -196,7 +204,7 @@ _FX NTSTATUS SbieApi_DebugError(SBIELOW_DATA* data, ULONG error)
     for(int i=28; i >= 0; i-=4)
         *ptr++ = table[(error >> i) & 0xF];
 
-    return SbieApi_DebugPrint(data, text);
+    return SbieApi_LogMsg(data->NtDeviceIoControlFile, data->api_device_handle, 2180, text);
 }
 
 
@@ -223,7 +231,40 @@ _FX void WaitForDebugger(SBIELOW_DATA *data)
 
     __debugbreak();
 }
+
 #endif
+
+
+//---------------------------------------------------------------------------
+// WriteMemorySafe
+//---------------------------------------------------------------------------
+
+
+_FX void WriteMemorySafe(SBIELOW_DATA* data, void *Address, SIZE_T Size, void *Data)
+{
+    void *RegionBase = Address;
+    SIZE_T RegionSize = Size;
+    ULONG OldProtect;
+
+    SBIELOW_CALL(NtProtectVirtualMemory)(
+        NtCurrentProcess(), &RegionBase, &RegionSize,
+        PAGE_EXECUTE_READWRITE, &OldProtect);
+
+    // memcopy is not available, lets do our own
+    switch (Size) {
+    case 1: *(UCHAR*)Address = *(UCHAR*)Data;       break;
+    case 2: *(USHORT*)Address = *(USHORT*)Data;     break;
+    case 4: *(ULONG*)Address = *(ULONG*)Data;       break;
+    case 8: *(ULONG64*)Address = *(ULONG64*)Data;   break;
+    default:
+        for (SIZE_T i = 0; i < Size; i++)
+            ((UCHAR*)Address)[i] = ((UCHAR*)Data)[i];
+    }
+
+    SBIELOW_CALL(NtProtectVirtualMemory)(
+        NtCurrentProcess(), &RegionBase, &RegionSize,
+        OldProtect, &OldProtect);
+}
 
 
 //---------------------------------------------------------------------------
@@ -233,11 +274,6 @@ _FX void WaitForDebugger(SBIELOW_DATA *data)
 
 _FX void PrepSyscalls(SBIELOW_DATA *data, void * SystemService)
 {
-    UCHAR *SystemServiceAsm;
-    void *RegionBase;
-    SIZE_T RegionSize;
-    ULONG OldProtect;
-
 #ifdef _M_ARM64
     if (data->flags.is_arm64ec) {
 
@@ -248,7 +284,8 @@ _FX void PrepSyscalls(SBIELOW_DATA *data, void * SystemService)
         // a replica of the #NtDeviceIoControlFile EC variant
         //
 
-        data->NtDeviceIoControlFile = (ULONG64)&NtDeviceIoControlFileEC;
+        ULONG64 pNtDeviceIoControlFileEC = (ULONG64)&NtDeviceIoControlFileEC;
+        WriteMemorySafe(data, &data->NtDeviceIoControlFile, sizeof(ULONG64), &pNtDeviceIoControlFileEC);
 
 
         // 
@@ -260,9 +297,9 @@ _FX void PrepSyscalls(SBIELOW_DATA *data, void * SystemService)
         // we can just copy the ULONG strait out of the native function
         //
 
-        DeviceIoControlSvc = *(ULONG*)&data->NtDeviceIoControlFile_code[0];
+        WriteMemorySafe(data, &DeviceIoControlSvc, sizeof(ULONG), &data->NtDeviceIoControlFile_code[0]);
 
-        
+
         //
         // get the EcExitThunkPtr which points to
         // __os_arm64x_dispatch_call_no_redirect
@@ -275,11 +312,15 @@ _FX void PrepSyscalls(SBIELOW_DATA *data, void * SystemService)
 
         ULONG* syscall_ec_data = (ULONG*)data->syscall_data;
 
-        EcExitThunkPtr = *(ULONG64*)((UINT_PTR)syscall_ec_data + syscall_ec_data[1] - 8);
+        UINT_PTR pEcExitThunkPtr = *(UINT_PTR*)((UINT_PTR)syscall_ec_data + syscall_ec_data[1] - 8);
+        WriteMemorySafe(data, &EcExitThunkPtr, sizeof(UINT_PTR), &pEcExitThunkPtr);
     }
     else
 #endif
-        data->NtDeviceIoControlFile = (ULONG64)&data->NtDeviceIoControlFile_code[0];
+    {
+        ULONG64 pNtDeviceIoControlFile = (ULONG64)&data->NtDeviceIoControlFile_code[0];
+        WriteMemorySafe(data, &data->NtDeviceIoControlFile, sizeof(ULONG64), &pNtDeviceIoControlFile);
+    }
 
     const LONG OFFSET_ULONG_PTR =
 #ifdef _M_ARM64
@@ -295,21 +336,14 @@ _FX void PrepSyscalls(SBIELOW_DATA *data, void * SystemService)
     // to include the data area pointer
     //
 
-    SystemServiceAsm = (UCHAR *)SystemService;
-    RegionBase = (void *)(SystemServiceAsm + OFFSET_ULONG_PTR);
-    RegionSize = sizeof(ULONG_PTR);
+    WriteMemorySafe(data, ((UCHAR *)SystemService) + OFFSET_ULONG_PTR, sizeof(ULONG_PTR), &data);
 
-    SBIELOW_CALL(NtProtectVirtualMemory)(
-        NtCurrentProcess(), &RegionBase, &RegionSize,
-        PAGE_EXECUTE_READWRITE, &OldProtect);
+    //
+    // store the SystemService address in pSystemService
+    //
 
-    *(ULONG_PTR *)(SystemServiceAsm + OFFSET_ULONG_PTR) = (ULONG_PTR)data;
-
-    SBIELOW_CALL(NtProtectVirtualMemory)(
-        NtCurrentProcess(), &RegionBase, &RegionSize,
-        OldProtect, &OldProtect);
-
-    data->pSystemService = (ULONG64)SystemServiceAsm;
+    ULONG64 SystemServicePtr = (ULONG64)SystemService;
+    WriteMemorySafe(data, &data->pSystemService, sizeof(ULONG64), &SystemServicePtr);
 }
 
 
@@ -539,7 +573,7 @@ _FX void InitSyscalls(SBIELOW_DATA *data, void * SystemService)
 _FX NTSTATUS MyImageOptionsEx(PUNICODE_STRING SubKey, PCWSTR ValueName, 
     ULONG Type, PVOID Buffer, ULONG BufferSize, PULONG ReturnedLength, BOOLEAN Wow64, SBIELOW_DATA* data)
 {
-    // Note: A normal string like L"LoadCHPEBinaries" would not resultin position independent code !!!
+    // Note: A normal string like L"LoadCHPEBinaries" would not result in position independent code !!!
     wchar_t LoadCHPEBinaries[] = { 'L','o','a','d','C','H','P','E','B','i','n','a','r','i','e','s',0 }; 
     PCWSTR ptr = ValueName;
     for (PCWSTR tmp = LoadCHPEBinaries; *ptr && *tmp && *ptr == *tmp; ptr++, tmp++);
@@ -597,33 +631,29 @@ _FX void DisableCHPE(SBIELOW_DATA* data)
     if (!RtlImageOptionsEx)
         return;
 
-    //
-    // backup bytes for trampoline
-    //
-
-    ULONG DetourSize = 28;
-    memcpy(data->RtlImageOptionsEx_tramp, RtlImageOptionsEx, DetourSize); 
-
-    //
-    // make target writable & create detour
-    //
-
     void *RegionBase;
     SIZE_T RegionSize;
     ULONG OldProtect;
+    ULONG* aCode;
 
-    RegionBase = (void*)RtlImageOptionsEx;
-    RegionSize = DetourSize; // 16;
+    //
+    // backup target & create simple trampoline
+    //
+
+    RegionBase = (void*)data->RtlImageOptionsEx_tramp;
+    RegionSize = sizeof(data->RtlImageOptionsEx_tramp);
     SBIELOW_CALL(NtProtectVirtualMemory)(
         NtCurrentProcess(), &RegionBase, &RegionSize,
         PAGE_EXECUTE_READWRITE, &OldProtect);
 
-	ULONG* aCode = (ULONG*)RtlImageOptionsEx;
-    aCode[0] = 0x580000a7;	// ldr x7, 20 - data
-	aCode[1] = 0x58000048;	// ldr x8, 8 - MyImageOptionsEx
-	aCode[2] = 0xD61F0100;	// br x8
-	*(DWORD64*)&aCode[3] = (DWORD64)MyImageOptionsEx; 
-    *(DWORD64*)&aCode[5] = (DWORD64)data;
+    ULONG DetourSize = 28;
+    memcpy(data->RtlImageOptionsEx_tramp, RtlImageOptionsEx, DetourSize); 
+
+    aCode = (ULONG*)(data->RtlImageOptionsEx_tramp + DetourSize); // 28
+	aCode[0] = 0x58000048;	// ldr x8, 8 - Rest of RtlImageOptionsEx
+	aCode[1] = 0xD61F0100;	// br x8
+	*(DWORD64*)&aCode[2] = (DWORD64)RtlImageOptionsEx + DetourSize; 
+    // 44
 
     SBIELOW_CALL(NtProtectVirtualMemory)(
         NtCurrentProcess(), &RegionBase, &RegionSize,
@@ -633,13 +663,29 @@ _FX void DisableCHPE(SBIELOW_DATA* data)
         NtCurrentProcess(), RegionBase, (ULONG)RegionSize);
 
     //
-    // create simple trampoline
+    // make target writable & create detour
     //
 
-    aCode = (ULONG*)(data->RtlImageOptionsEx_tramp + DetourSize);
-	aCode[0] = 0x58000048;	// ldr x8, 8 - Rest of RtlImageOptionsEx
-	aCode[1] = 0xD61F0100;	// br x8
-	*(DWORD64*)&aCode[2] = (DWORD64)RtlImageOptionsEx + DetourSize; 
+    RegionBase = (void*)RtlImageOptionsEx;
+    RegionSize = DetourSize;
+    SBIELOW_CALL(NtProtectVirtualMemory)(
+        NtCurrentProcess(), &RegionBase, &RegionSize,
+        PAGE_EXECUTE_READWRITE, &OldProtect);
+
+	aCode = (ULONG*)RtlImageOptionsEx;
+    aCode[0] = 0x580000a7;	// ldr x7, 20 - data
+	aCode[1] = 0x58000048;	// ldr x8, 8 - MyImageOptionsEx
+	aCode[2] = 0xD61F0100;	// br x8
+	*(DWORD64*)&aCode[3] = (DWORD64)MyImageOptionsEx; 
+    *(DWORD64*)&aCode[5] = (DWORD64)data;
+    //28
+
+    SBIELOW_CALL(NtProtectVirtualMemory)(
+        NtCurrentProcess(), &RegionBase, &RegionSize,
+        OldProtect, &OldProtect);
+
+    SBIELOW_CALL(NtFlushInstructionCache)(
+        NtCurrentProcess(), RegionBase, (ULONG)RegionSize);
 }
 #endif
 
@@ -726,61 +772,98 @@ ULONG_PTR EntrypointC(SBIELOW_DATA *data, void *DetourCode, void *SystemService)
     // LdrInitializeThunk which stores new value into ProcessHeap which
     // will not be -1, thus releasing any waiting threads
     //
-    volatile ULONG_PTR *ProcessHeap = GET_ADDR_OF_PROCESS_HEAP;
+    //volatile ULONG_PTR *ProcessHeap = GET_ADDR_OF_PROCESS_HEAP;
 
-    ULONG_PTR OldProcessHeap =
+    if(!data->Init_Done)
+    {
+        SYSCALL_DATA* syscall_data;
+        SBIELOW_EXTRA_DATA *extra;
+
+        //
+        // Starting with Windows 11 build 26040 ProcessHeap must be 0
+        // for the process initialisation to be successful, hence from
+        // now on we use Init_Lock in the SBIELOW_EXTRA_DATA to synchronize
+        // the execution of the init code, the first thread to arrive here
+        // will encounter the initial 0 value and be allowed to execute
+        // the value will be changed to -1 indicating initialization in
+        // progress. Subsequent threads will wait, until the first thread,
+        // once done changes the value to 1 indicating initialization completion.
+        // 
+        // Since SBIELOW_EXTRA_DATA is freed by Ldr_Inject_Entry hence we need
+        // to also use Init_Done in SBIELOW_DATA its initially 0 and
+        // once the initialization is completed will be set to 1, such
+        // that later created threads can skip the initialization code.
+        //
+
+        syscall_data = (SYSCALL_DATA*)data->syscall_data;
+      
+        extra = (SBIELOW_EXTRA_DATA *) (data->syscall_data + syscall_data->extra_data_offset);
+
+        volatile ULONG_PTR *Init_Lock = &extra->Init_Lock;
+
 #ifdef _WIN64
-        _InterlockedCompareExchange64(ProcessHeap, -1, 0);
-
+        ULONG_PTR OldInit_Lock = _InterlockedCompareExchange64(Init_Lock, -1, 0);
 #else ! _WIN64
-                    _InterlockedCompareExchange(ProcessHeap, -1, 0);
+        ULONG_PTR OldInit_Lock = _InterlockedCompareExchange(Init_Lock, -1, 0);
 #endif _WIN64
 
-    if (OldProcessHeap == 0) {
+        if (OldInit_Lock == 0) {
 
-        //
-        // the first thread arrives here
-        //
+            //
+            // the first thread arrives here
+            //
 
-        // WaitForDebugger(data);
+            // WaitForDebugger(data);
 
-        //wchar_t text[] = { 't','e','s','t',0 };
-        //SbieApi_DebugPrint(data, text);
+            //wchar_t text[] = { 't','e','s','t',0 };
+            //SbieApi_LogMsg(data->NtDeviceIoControlFile, data->api_device_handle, 1122, text);
 
-        PrepSyscalls(data, SystemService);
-        if (!data->flags.bHostInject && !data->flags.bNoSysHooks)
-            InitSyscalls(data, SystemService);
+            PrepSyscalls(data, SystemService);
+            if (!data->flags.bHostInject && !data->flags.bNoSysHooks)
+                InitSyscalls(data, SystemService);
 
-		InitInject(data, DetourCode);
+		    InitInject(data, DetourCode);
 
 #ifdef _WIN64
-        if (data->flags.is_wow64) {
+            if (data->flags.is_wow64) {
 
 #ifdef _M_ARM64
-            if(!data->flags.is_chpe32)
-		        DisableCHPE(data);
+                if(!data->flags.is_chpe32)
+		            DisableCHPE(data);
 #endif
-            if (!data->flags.bNoConsole)
-                InitConsoleWOW64(data);
-        }
+                if (!data->flags.bNoConsole)
+                    InitConsoleWOW64(data);
+            }
 #endif
 
-    } else if (OldProcessHeap == -1) {
+            // Set Init_Done 
+            UCHAR Init_Done = 1;
+            WriteMemorySafe(data, &data->Init_Done, sizeof(UCHAR), &Init_Done);
 
-        //
-        // any other threads arrive here and will wait for
-        // the first thread to finish initializing SbieLow
-        //
+            // Release waiting threads
+#ifdef _WIN64
+            _InterlockedExchange64(Init_Lock, 1);
+#else ! _WIN64
+            _InterlockedExchange(Init_Lock, 1);
+#endif _WIN64
 
-        LARGE_INTEGER delay;
-        delay.QuadPart = -SECONDS(3) / 100; // 0FFFFFFFFh 0FFFB6C20h
+        } else if (OldInit_Lock == -1) {
 
-        while (*ProcessHeap == -1) {
+            //
+            // any other threads arrive here and will wait for
+            // the first thread to finish initializing SbieLow
+            //
 
-            const P_NtDelayExecution NtDelayExecution =
-                (P_NtDelayExecution) &data->NtDelayExecution_code;
+            LARGE_INTEGER delay;
+            delay.QuadPart = -SECONDS(3) / 100; // 0FFFFFFFFh 0FFFB6C20h
 
-            NtDelayExecution(FALSE, &delay);
+            while (*Init_Lock == -1) {
+
+                const P_NtDelayExecution NtDelayExecution =
+                    (P_NtDelayExecution) &data->NtDelayExecution_code;
+
+                NtDelayExecution(FALSE, &delay);
+            }
         }
     }
 
