@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -38,6 +38,9 @@
 #include "thread.h"
 #include "wfp.h"
 #include "common/my_version.h"
+#define KERNEL_MODE
+#include "verify.h"
+#include "dyn_data.h"
 
 
 //---------------------------------------------------------------------------
@@ -98,9 +101,11 @@ static NTSTATUS Process_CreateUserProcess(
 #ifdef USE_PROCESS_MAP
 HASH_MAP Process_Map;
 HASH_MAP Process_MapDfp;
+HASH_MAP Process_MapFcp;
 #else
 LIST Process_List;
 LIST Process_ListDfp;
+LIST Process_ListFcp;
 #endif
 PERESOURCE Process_ListLock = NULL;
 
@@ -133,9 +138,13 @@ _FX BOOLEAN Process_Init(void)
 
     map_init(&Process_MapDfp, Driver_Pool);
 	map_resize(&Process_MapDfp, 128); // prepare some buckets for better performance
+
+    map_init(&Process_MapFcp, Driver_Pool);
+	map_resize(&Process_MapFcp, 128); // prepare some buckets for better performance
 #else
     List_Init(&Process_List);
     List_Init(&Process_ListDfp);
+    List_Init(&Process_ListFcp);
 #endif
 
     if (! Mem_GetLockResource(&Process_ListLock, TRUE))
@@ -211,6 +220,7 @@ _FX BOOLEAN Process_Init(void)
     Api_SetFunction(API_QUERY_PROCESS_PATH,   Process_Api_QueryProcessPath);
     Api_SetFunction(API_QUERY_PATH_LIST,      Process_Api_QueryPathList);
     Api_SetFunction(API_ENUM_PROCESSES,       Process_Api_Enum);
+    Api_SetFunction(API_KILL_PROCESS,         Process_Api_Kill);
 
     return TRUE;
 }
@@ -529,7 +539,7 @@ _FX PROCESS *Process_Find(HANDLE ProcessId, KIRQL *out_irql)
 // Process_FindSandboxed
 //---------------------------------------------------------------------------
 
-
+#ifdef XP_SUPPORT
 _FX PROCESS *Process_FindSandboxed(HANDLE ProcessId, KIRQL *out_irql)
 {
     PROCESS* proc = Process_Find(ProcessId, out_irql);
@@ -542,6 +552,30 @@ _FX PROCESS *Process_FindSandboxed(HANDLE ProcessId, KIRQL *out_irql)
     }
     return proc;
 }
+#endif
+
+//---------------------------------------------------------------------------
+// Process_Find_ByHandle
+//---------------------------------------------------------------------------
+
+
+//_FX PROCESS *Process_Find_ByHandle(HANDLE Handle, KIRQL *out_irql)
+//{
+//    NTSTATUS Status;
+//    PEPROCESS ProcessObject = NULL;
+//    PROCESS* Process = NULL;
+//    
+//    Status = ObReferenceObjectByHandle(Handle, PROCESS_QUERY_INFORMATION, *PsProcessType, UserMode, (PVOID*)&ProcessObject, NULL);
+//    if (NT_SUCCESS(Status)) {
+//
+//        Process = Process_Find(PsGetProcessId(ProcessObject), out_irql);
+//
+//        // Dereference the process object
+//        ObDereferenceObject(ProcessObject);
+//    }
+//
+//    return Process;
+//}
 
 
 //---------------------------------------------------------------------------
@@ -755,7 +789,7 @@ _FX PROCESS *Process_Create(
     // check certificate
     //
 
-    if (!Driver_Certified && !proc->image_sbie) {
+    if (!Verify_CertInfo.opt_sec && !proc->image_sbie) {
 
         const WCHAR* exclusive_setting = NULL;
         if (proc->use_security_mode)
@@ -776,20 +810,47 @@ _FX PROCESS *Process_Create(
             exclusive_setting = L"NoSecurityIsolation";
         else if (proc->protect_host_images)
             exclusive_setting = L"ProtectHostImages";
-        else if (proc->confidential_box)
-            exclusive_setting = L"ConfidentialBox";
 
         if (exclusive_setting) {
 
             Log_Msg_Process(MSG_6004, proc->box->name, exclusive_setting, box->session_id, proc->pid);
 
-            //Pool_Delete(pool);
-            //Process_CreateTerminated(ProcessId, box->session_id);
-            //return NULL;
-            
             // allow the process to run for a sort while to allow the features to be evaluated
             Process_ScheduleKill(proc, 5*60*1000); // 5 minutes
         }
+    }
+
+    if (!Verify_CertInfo.opt_enc && !proc->image_sbie) {
+        
+        const WCHAR* exclusive_setting = NULL;
+        if (proc->confidential_box)
+            exclusive_setting = L"ConfidentialBox";
+
+        if (exclusive_setting) {
+
+            Log_Msg_Process(MSG_6009, proc->box->name, exclusive_setting, box->session_id, proc->pid);
+
+            Pool_Delete(pool);
+            Process_CreateTerminated(ProcessId, box->session_id);
+            return NULL;
+        }
+    }
+
+    //
+    // If we don't have valid Dyndata, we force NoSecurityIsolation=y on all boxes
+    // and issue a security warning MSG_1207
+    //
+
+    if (!Dyndata_Active && !proc->bAppCompartment) {
+
+        proc->bAppCompartment = TRUE;
+		proc->always_close_for_boxed = FALSE;
+		proc->dont_open_for_boxed = FALSE;
+		proc->protect_host_images = FALSE;
+
+        WCHAR info[12];
+        RtlStringCbPrintfW(info, sizeof(info), L"%d", Driver_OsBuild);
+        Log_Msg1(MSG_1207, info);
     }
 
     //
@@ -1209,7 +1270,7 @@ _FX BOOLEAN Process_NotifyProcess_Create(
         BOX* breakout_box = NULL;
 
         if (box && Process_IsBreakoutProcess(box, ImagePath)) {
-            if(!Driver_Certified)
+            if(!Verify_CertInfo.active)
                 Log_Msg_Process(MSG_6004, box->name, L"BreakoutProcess", box->session_id, CallerId);
             else {
                 UNICODE_STRING image_uni;
@@ -1347,9 +1408,7 @@ _FX BOOLEAN Process_NotifyProcess_Create(
             ULONG session_id = new_proc->box->session_id;
 
             new_proc->bHostInject = bHostInject;
-#ifdef DRV_BREAKOUT
             new_proc->starter_id = CallerId;
-#endif
             new_proc->parent_was_start_exe = parent_was_start_exe;
             new_proc->rights_dropped = parent_had_rights_dropped;
             new_proc->forced_process = process_is_forced;
@@ -1507,6 +1566,8 @@ _FX void Process_Delete(HANDLE ProcessId)
 #endif
 
     Process_DfpDelete(ProcessId);
+
+    Process_FcpDelete(ProcessId);
 
     ExReleaseResourceLite(Process_ListLock);
     KeLowerIrql(irql);

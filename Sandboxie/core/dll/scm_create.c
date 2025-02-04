@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -79,6 +79,9 @@ static BOOL Scm_DeleteService(SC_HANDLE hService);
 static ULONG Scm_StartBoxedService2(
     const WCHAR *name, SERVICE_QUERY_RPL *qrpl);
 
+static BOOL Scm_StartServiceWImpl(
+    SC_HANDLE hService, DWORD dwNumServiceArgs, void *lpServiceArgVector);
+
 static BOOL Scm_StartServiceW(
     SC_HANDLE hService, DWORD dwNumServiceArgs, void *lpServiceArgVector);
 
@@ -120,11 +123,22 @@ static BOOL Scm_SetServiceStatus_Internal(
     SERVICE_STATUS_HANDLE hServiceStatus, LPSERVICE_STATUS lpServiceStatus,
     BOOLEAN SetProcessId);
 
+static BOOL Scm_SetServiceStatusImpl(
+    SERVICE_STATUS_HANDLE hServiceStatus, LPSERVICE_STATUS lpServiceStatus);
+
 static BOOL Scm_SetServiceStatus(
     SERVICE_STATUS_HANDLE hServiceStatus, LPSERVICE_STATUS lpServiceStatus);
 
 static BOOL Scm_ControlService(
     SC_HANDLE hService, DWORD dwControl, SERVICE_STATUS *lpServiceStatus);
+
+static BOOL Scm_ControlServiceExA(
+    SC_HANDLE hService, DWORD dwControl,
+    ULONG dwInfoLevel, void *pControlParams);
+
+static BOOL Scm_ControlServiceExW(
+    SC_HANDLE hService, DWORD dwControl,
+    ULONG dwInfoLevel, void *pControlParams);
 
 static void Scm_DeletePermissions(const WCHAR *AppIdGuid);
 
@@ -296,11 +310,11 @@ _FX SC_HANDLE Scm_CreateServiceW(
     // and that the service name is not NULL)
     //
 
-    hService = Scm_OpenServiceW(
+    hService = Scm_OpenServiceWImpl(
         hSCManager, lpServiceName, SERVICE_QUERY_STATUS);
 
     if (hService) {
-        Scm_CloseServiceHandle(hService);
+        Scm_CloseServiceHandleImpl(hService);
         SetLastError(ERROR_SERVICE_EXISTS);
         return NULL;
     }
@@ -975,11 +989,11 @@ _FX ULONG Scm_StartBoxedService2(const WCHAR *name, SERVICE_QUERY_RPL *qrpl)
         _wcsicmp(name, _wuauserv) == 0       ||
         _wcsicmp(name, Scm_CryptSvc) == 0) {
 
-        PROCESS_INFORMATION pi;
+        //PROCESS_INFORMATION pi;
         STARTUPINFO si;
 
         const WCHAR *ProcessName;
-        BOOLEAN use_sbiesvc = TRUE;
+        //BOOLEAN use_sbiesvc = TRUE;
 
         if (_wcsicmp(name, _bits) == 0) {
             ProcessName = SandboxieBITS;
@@ -990,11 +1004,11 @@ _FX ULONG Scm_StartBoxedService2(const WCHAR *name, SERVICE_QUERY_RPL *qrpl)
         }
         else if (_wcsicmp(name, Scm_CryptSvc) == 0) {
             ProcessName = SandboxieCrypto;
-            use_sbiesvc = FALSE;
+            //use_sbiesvc = FALSE;
         } else
             ProcessName = NULL;
 
-        if (! use_sbiesvc) {
+        /*if (! use_sbiesvc) {
 
             memzero(&si, sizeof(STARTUPINFO));
             si.cb = sizeof(STARTUPINFO);
@@ -1007,7 +1021,7 @@ _FX ULONG Scm_StartBoxedService2(const WCHAR *name, SERVICE_QUERY_RPL *qrpl)
             CloseHandle(pi.hProcess);
 
             return ERROR_SUCCESS;
-        }
+        }*/
 
         si.lpReserved = NULL;
         if (SbieDll_RunFromHome(ProcessName, NULL, &si, NULL)) {
@@ -1076,11 +1090,11 @@ _FX ULONG Scm_StartBoxedService2(const WCHAR *name, SERVICE_QUERY_RPL *qrpl)
 
 
 //---------------------------------------------------------------------------
-// Scm_StartServiceW
+// Scm_StartServiceWImpl
 //---------------------------------------------------------------------------
 
 
-_FX BOOL Scm_StartServiceW(
+_FX BOOL Scm_StartServiceWImpl(
     SC_HANDLE hService, DWORD dwNumServiceArgs, void *lpServiceArgVector)
 {
     union {
@@ -1124,6 +1138,31 @@ _FX BOOL Scm_StartServiceW(
     return FALSE;
 }
 
+
+//---------------------------------------------------------------------------
+// Scm_HookStartServiceW
+//---------------------------------------------------------------------------
+
+
+ULONG_PTR Scm_HookStartServiceW(VOID* hook)
+{
+	__my_StartServiceW = hook;
+	return (ULONG_PTR)Scm_StartServiceWImpl;
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_StartServiceW
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_StartServiceW(
+    SC_HANDLE hService, DWORD dwNumServiceArgs, void *lpServiceArgVector)
+{
+	if (__my_StartServiceW)
+		return __my_StartServiceW(hService, dwNumServiceArgs, lpServiceArgVector);
+	return Scm_StartServiceWImpl(hService, dwNumServiceArgs, lpServiceArgVector);
+}
 
 //---------------------------------------------------------------------------
 // Scm_StartServiceA
@@ -1212,34 +1251,40 @@ _FX BOOL Scm_StartServiceCtrlDispatcherX(
         // run is not necessarily the first entry in the table.
         //
 
+        if (wcscmp(ServiceName, L"*") == 0) {
+
+            BOOLEAN TooMany;
+
+            if (IsUnicode) {
+
+                SERVICE_TABLE_ENTRYW *svc = (SERVICE_TABLE_ENTRYW *)ServiceTable;
+                ServiceName = svc->lpServiceName;
+                TooMany = (svc[1].lpServiceName || svc[1].lpServiceProc);
+
+            } else {
+
+                SERVICE_TABLE_ENTRYA *svc = (SERVICE_TABLE_ENTRYA *)ServiceTable;
+
+                ANSI_STRING ansi;
+                RtlInitString(&ansi, svc->lpServiceName);
+                RtlAnsiStringToUnicodeString(&uni, &ansi, TRUE);
+                ServiceName = uni.Buffer;
+
+                TooMany = (svc[1].lpServiceName || svc[1].lpServiceProc);
+            }
+
+            if (TooMany) {
+
+                SbieApi_Log(2205, L"StartServiceCtrlDispatcher");
+                //SetLastError(ERROR_INVALID_PARAMETER);
+                //return FALSE;
+            }
+        }
+
     } else {
 
-        BOOLEAN TooMany;
-
-        if (IsUnicode) {
-
-            SERVICE_TABLE_ENTRYW *svc = (SERVICE_TABLE_ENTRYW *)ServiceTable;
-            ServiceName = svc->lpServiceName;
-            TooMany = (svc[1].lpServiceName || svc[1].lpServiceProc);
-
-        } else {
-
-            SERVICE_TABLE_ENTRYA *svc = (SERVICE_TABLE_ENTRYA *)ServiceTable;
-
-            ANSI_STRING ansi;
-            RtlInitString(&ansi, svc->lpServiceName);
-            RtlAnsiStringToUnicodeString(&uni, &ansi, TRUE);
-            ServiceName = uni.Buffer;
-
-            TooMany = (svc[1].lpServiceName || svc[1].lpServiceProc);
-        }
-
-        if (TooMany) {
-
-            SbieApi_Log(2205, L"StartServiceCtrlDispatcher");
-            //SetLastError(ERROR_INVALID_PARAMETER);
-            //return FALSE;
-        }
+        SetLastError(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT);
+        return FALSE;
     }
 
     WCHAR text[130];
@@ -1265,7 +1310,7 @@ _FX BOOL Scm_StartServiceCtrlDispatcherX(
     ss.dwControlsAccepted = SERVICE_ACCEPT_STOP;
     ss.dwWaitHint = 5000;
 
-    Scm_SetServiceStatus(HANDLE_SERVICE_STATUS, &ss);
+    Scm_SetServiceStatusImpl(HANDLE_SERVICE_STATUS, &ss);
 
     //
     // launch ServiceMain to initialize
@@ -1374,6 +1419,30 @@ _FX BOOL Scm_StartServiceCtrlDispatcherX(
 
 
 //---------------------------------------------------------------------------
+// Scm_StartServiceCtrlDispatcherWImpl
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_StartServiceCtrlDispatcherWImpl(
+    const SERVICE_TABLE_ENTRYW *ServiceTable)
+{
+    return Scm_StartServiceCtrlDispatcherX(ServiceTable, TRUE);
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_HookStartServiceCtrlDispatcherW
+//---------------------------------------------------------------------------
+
+
+_FX ULONG_PTR Scm_HookStartServiceCtrlDispatcherW(VOID* hook)
+{
+	__my_StartServiceCtrlDispatcherW = hook;
+	return (ULONG_PTR)Scm_StartServiceCtrlDispatcherWImpl;
+}
+
+
+//---------------------------------------------------------------------------
 // Scm_StartServiceCtrlDispatcherW
 //---------------------------------------------------------------------------
 
@@ -1381,7 +1450,9 @@ _FX BOOL Scm_StartServiceCtrlDispatcherX(
 _FX BOOL Scm_StartServiceCtrlDispatcherW(
     const SERVICE_TABLE_ENTRYW *ServiceTable)
 {
-    return Scm_StartServiceCtrlDispatcherX(ServiceTable, TRUE);
+	if (__my_StartServiceCtrlDispatcherW)
+		return __my_StartServiceCtrlDispatcherW(ServiceTable);
+	return Scm_StartServiceCtrlDispatcherWImpl(ServiceTable);
 }
 
 
@@ -1555,11 +1626,11 @@ _FX BOOL Scm_SetServiceStatus_Internal(
 
 
 //---------------------------------------------------------------------------
-// Scm_SetServiceStatus
+// Scm_SetServiceStatusImpl
 //---------------------------------------------------------------------------
 
 
-_FX BOOL Scm_SetServiceStatus(
+_FX BOOL Scm_SetServiceStatusImpl(
     SERVICE_STATUS_HANDLE hServiceStatus, LPSERVICE_STATUS lpServiceStatus)
 {
     return Scm_SetServiceStatus_Internal(
@@ -1568,11 +1639,37 @@ _FX BOOL Scm_SetServiceStatus(
 
 
 //---------------------------------------------------------------------------
-// Scm_ControlService
+// Scm_HookSetServiceStatus
 //---------------------------------------------------------------------------
 
 
-_FX BOOL Scm_ControlService(
+_FX ULONG_PTR Scm_HookSetServiceStatus(VOID* hook)
+{
+	__my_SetServiceStatus = hook;
+	return (ULONG_PTR)Scm_SetServiceStatusImpl;
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_SetServiceStatus
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_SetServiceStatus(
+    SERVICE_STATUS_HANDLE hServiceStatus, LPSERVICE_STATUS lpServiceStatus)
+{
+	if (__my_SetServiceStatus)
+		return __my_SetServiceStatus(hServiceStatus, lpServiceStatus);
+	return Scm_SetServiceStatusImpl(hServiceStatus, lpServiceStatus);
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_ControlServiceImpl
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_ControlServiceImpl(
     SC_HANDLE hService, DWORD dwControl, SERVICE_STATUS *lpServiceStatus)
 {
     NTSTATUS status;
@@ -1599,7 +1696,7 @@ _FX BOOL Scm_ControlService(
         if (dwControl == SERVICE_CONTROL_CONTINUE ||
             dwControl == SERVICE_CONTROL_INTERROGATE) {
 
-            return Scm_QueryServiceStatus(hService, lpServiceStatus);
+            return Scm_QueryServiceStatusImpl(hService, lpServiceStatus);
 
         } else {
 
@@ -1677,7 +1774,63 @@ _FX BOOL Scm_ControlService(
         return FALSE;
     }
 
-    return Scm_QueryServiceStatus(hService, lpServiceStatus);
+    return Scm_QueryServiceStatusImpl(hService, lpServiceStatus);
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_HookControlService
+//---------------------------------------------------------------------------
+
+
+ULONG_PTR Scm_HookControlService(VOID* hook)
+{
+	__my_ControlService = hook;
+	return (ULONG_PTR)Scm_ControlServiceImpl;
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_ControlService
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_ControlService(
+    SC_HANDLE hService, DWORD dwControl, SERVICE_STATUS *lpServiceStatus)
+{
+	if (__my_ControlService)
+		return __my_ControlService(hService, dwControl, lpServiceStatus);
+	return Scm_ControlServiceImpl(hService, dwControl, lpServiceStatus);
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_ControlServiceA
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_ControlServiceExA(
+    SC_HANDLE hService, DWORD dwControl,
+    ULONG dwInfoLevel, void* pControlParams)
+{
+    PSERVICE_CONTROL_STATUS_REASON_PARAMSA pParams = (PSERVICE_CONTROL_STATUS_REASON_PARAMSA)pControlParams;
+
+    return Scm_ControlServiceImpl(hService, dwControl, &pParams->ServiceStatus);
+}
+
+
+//---------------------------------------------------------------------------
+// Scm_ControlServiceW
+//---------------------------------------------------------------------------
+
+
+_FX BOOL Scm_ControlServiceExW(
+    SC_HANDLE hService, DWORD dwControl,
+    ULONG dwInfoLevel, void* pControlParams) 
+{
+    PSERVICE_CONTROL_STATUS_REASON_PARAMSW pParams = (PSERVICE_CONTROL_STATUS_REASON_PARAMSW)pControlParams;
+
+    return Scm_ControlServiceImpl(hService, dwControl, &pParams->ServiceStatus);
 }
 
 

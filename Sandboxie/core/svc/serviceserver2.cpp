@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -31,6 +31,7 @@
 #include "core/dll/sbiedll.h"
 #include <aclapi.h>
 #include "ProcessServer.h"
+#include <wtsapi32.h>
 
 #define MISC_H_WITHOUT_WIN32_NTDDK_H
 #include "misc.h"
@@ -82,6 +83,13 @@ bool ServiceServer::CanCallerDoElevation(
 
             if (DropRights && SbieDll_CheckStringInList(ServiceName, boxname, L"StartService"))
                 DropRights = false;
+
+            //
+            // always allow to start cryptsvc if needed
+            //
+
+            if (DropRights && _wcsicmp(ServiceName, L"CryptSvc") == 0)
+                DropRights = false;
         }
     }
                     
@@ -113,6 +121,8 @@ bool ServiceServer::CanAccessSCM(HANDLE idProcess)
 	SbieApi_QueryProcess(idProcess, boxname, exename, NULL, NULL); // if this fail we take the global config if present
 	if (SbieApi_QueryConfBool(boxname, L"UnrestrictedSCM", FALSE))
 		return true;
+    ULONG64 ProcessFlags = SbieApi_QueryProcessInfo(idProcess, 0);
+    BOOLEAN CompartmentMode = (ProcessFlags & SBIE_FLAG_APP_COMPARTMENT) != 0;
 
 	//
 	// DcomLaunch runs as user but needs to be able to access the SCM 
@@ -134,7 +144,7 @@ bool ServiceServer::CanAccessSCM(HANDLE idProcess)
 
 	HANDLE hToken = NULL;
     // OriginalToken BEGIN
-    if (SbieApi_QueryConfBool(boxname, L"NoSecurityIsolation", FALSE) || SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)) {
+    if (CompartmentMode || SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)) {
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (DWORD)(UINT_PTR)idProcess);
         if (hProcess != NULL) {
             OpenProcessToken(hProcess, TOKEN_IMPERSONATE | TOKEN_QUERY | TOKEN_DUPLICATE | STANDARD_RIGHTS_READ, &hToken);
@@ -328,13 +338,14 @@ ULONG ServiceServer::RunHandler2(
     BOOL  asSys;
 
     WCHAR boxname[BOXNAME_COUNT] = { 0 };
-
     SbieApi_QueryProcess(idProcess, boxname, NULL, NULL, NULL);
+    ULONG64 ProcessFlags = SbieApi_QueryProcessInfo(idProcess, 0);
+    BOOLEAN CompartmentMode = (ProcessFlags & SBIE_FLAG_APP_COMPARTMENT) != 0;
 
     if (ok) {
         errlvl = 0x21;
         ExePath = BuildPathForStartExe(idProcess, devmap, 
-                                        (type & SERVICE_WIN32_OWN_PROCESS) ? svcname : NULL, 
+                                        svcname ? (type & SERVICE_WIN32_OWN_PROCESS) ? svcname : L"*" : NULL, 
                                         path, NULL);
         if (! ExePath) {
             ok = FALSE;
@@ -350,8 +361,12 @@ ULONG ServiceServer::RunHandler2(
             // use our system token
             ok = OpenProcessToken(GetCurrentProcess(), TOKEN_RIGHTS, &hOldToken);
         }
-        // OriginalToken BEGIN
-        else if (SbieApi_QueryConfBool(boxname, L"NoSecurityIsolation", FALSE) || SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)) {
+        else {
+            // use the users default token
+            ok = WTSQueryUserToken(idSession, &hOldToken);
+        }
+        /*// OriginalToken BEGIN
+        else if (CompartmentMode || SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)) {
             HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (ULONG)(ULONG_PTR)idProcess);
             if (!hProcess)
                 ok = FALSE;
@@ -366,7 +381,7 @@ ULONG ServiceServer::RunHandler2(
         else {
             // use the callers original token
             hOldToken = (HANDLE)SbieApi_QueryProcessInfo(idProcess, 'ptok');
-        }
+        }*/
     }
 
     if (ok) {
@@ -393,7 +408,7 @@ ULONG ServiceServer::RunHandler2(
                 ok = ProcessServer::RunSandboxedSetDacl(hProcess, hNewToken, GENERIC_ALL, TRUE, idProcess);
             else if (SbieApi_QueryConfBool(boxname, L"AdjustBoxedSystem", TRUE))
                 // OriginalToken BEGIN
-                if (!SbieApi_QueryConfBool(boxname, L"NoSecurityIsolation", FALSE) && !SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE))
+                if (!CompartmentMode && !SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE))
                 // OriginalToken END
                 ok = ProcessServer::RunSandboxedSetDacl(hProcess, hNewToken, GENERIC_READ, FALSE);
 

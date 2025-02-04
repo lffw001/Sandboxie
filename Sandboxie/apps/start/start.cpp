@@ -28,6 +28,9 @@
 #include "core/svc/SbieIniWire.h"
 #include "common/my_version.h"
 #include "msgs/msgs.h"
+#include "core/drv/api_defs.h"
+#include <psapi.h>
+#include <Shlwapi.h>
 
 
 //---------------------------------------------------------------------------
@@ -49,6 +52,7 @@
 
 void List_Process_Ids(void);
 int Terminate_All_Processes(BOOL all_boxes);
+int Unmount_All_Boxes(BOOL all_boxes);
 int Delete_All_Sandboxes();
 
 extern WCHAR *DoRunDialog(HINSTANCE hInstance);
@@ -77,8 +81,10 @@ extern "C" {
 
 
 WCHAR BoxName[BOXNAME_COUNT];
+WCHAR BoxKey[128+1];
 
 PWSTR ChildCmdLine = NULL;
+PWSTR ChildWrkDir = NULL;
 BOOL run_mail_agent = FALSE;
 BOOL display_run_dialog = FALSE;
 int display_start_menu = 0;
@@ -86,11 +92,11 @@ BOOL execute_auto_run = FALSE;
 BOOL execute_open_with = FALSE;
 BOOL run_elevated_2 = FALSE;
 BOOL disable_force_on_this_program = FALSE;
+BOOL force_children_on_this_program = FALSE;
 BOOL auto_select_default_box = FALSE;
 WCHAR *StartMenuSectionName = NULL;
 BOOL run_silent = FALSE;
 BOOL keep_alive = FALSE;
-BOOL dont_start_sbie_ctrl = FALSE;
 BOOL hide_window = FALSE;
 BOOL wait_for_process = FALSE;
 BOOLEAN layout_rtl = FALSE;
@@ -433,9 +439,15 @@ BOOL Parse_Command_Line(void)
             if (_wcsnicmp(cmd, L"open_agent:", 11) == 0) {
                 cmd += 11;
                 tmp = Eat_String(cmd);
+                if (*cmd == L'\"') {
+                    cmd++;
+                    tmp--;
+                }
                 ULONG len = ULONG(tmp - cmd) * sizeof(WCHAR);
                 memcpy((WCHAR*)&buffer[req.length], cmd, len);
                 req.length += len;
+                *((WCHAR*)&buffer[req.length]) = 0;
+                req.length += sizeof(WCHAR);
             }
 
             rpl = SbieDll_CallServer(&req);
@@ -573,16 +585,6 @@ BOOL Parse_Command_Line(void)
             SetEnvironmentVariable(env_name_x, env_value_x);
 
         //
-        // Command line switch /nosbiectrl
-        //
-
-        } else if (_wcsnicmp(cmd, L"nosbiectrl", 10) == 0) {
-
-            cmd += 10;
-
-            dont_start_sbie_ctrl = TRUE;
-
-        //
         // Command line switch /reload
         //
 
@@ -603,6 +605,71 @@ BOOL Parse_Command_Line(void)
         } else if (_wcsnicmp(cmd, L"terminate", 9) == 0) {
 
             return die(Terminate_All_Processes(FALSE));
+            
+        //
+        // Command line switch /unmount, /unmount_all
+        //
+
+        } else if (_wcsnicmp(cmd, L"unmount_all", 11) == 0) {
+
+            Terminate_All_Processes(TRUE);
+            return die(Unmount_All_Boxes(TRUE));
+
+        } else if (_wcsnicmp(cmd, L"unmount", 7) == 0) {
+
+            Terminate_All_Processes(FALSE);
+            return die(Unmount_All_Boxes(FALSE));
+
+        //
+        // Command line switch /key:[box password] /mount
+        //
+
+        } else if (_wcsnicmp(cmd, L"key:", 4) == 0) {
+
+            cmd += 4;
+
+            tmp = cmd;
+
+            //
+            // parameter specifies boxkey
+            //
+
+            WCHAR end = L' ';
+            if (*tmp == L'\"') {
+                ++tmp;
+                ++cmd;
+                end = L'\"';
+            }
+
+            while (*cmd && *cmd != end) {
+                ++cmd;
+            }
+
+            if (tmp == cmd || (cmd - tmp > ARRAYSIZE(BoxKey)-1)) {
+
+                if (run_silent)
+                    ExitProcess(ERROR_UNKNOWN_PROPERTY);
+
+                SetLastError(0);
+                Show_Error(SbieDll_FormatMessage1(MSG_3202, tmp));
+                return FALSE;
+            }
+
+            memzero(BoxKey, sizeof(BoxKey));
+            wcsncpy(BoxKey, tmp, (cmd - tmp));
+
+            if (end == L'\"')
+                ++cmd;
+
+        } else if (_wcsnicmp(cmd, L"mount_protected", 15) == 0) {
+
+            Validate_Box_Name();
+            return die(SbieDll_Mount(BoxName, BoxKey, TRUE) ? EXIT_SUCCESS : EXIT_FAILURE);
+
+        } else if (_wcsnicmp(cmd, L"mount", 5) == 0) {
+
+            Validate_Box_Name();
+            return die(SbieDll_Mount(BoxName, BoxKey, FALSE) ? EXIT_SUCCESS : EXIT_FAILURE);
 
         //
         // Command line switch /listpids
@@ -655,6 +722,17 @@ BOOL Parse_Command_Line(void)
             cmd = Eat_String(cmd);
 
             disable_force_on_this_program = TRUE;
+
+        //
+        // Command line switch /force_children or /fcp
+        //
+
+        } else if (_wcsnicmp(cmd, L"force_children", 14) == 0 ||
+                   _wcsnicmp(cmd, L"fcp",             3) == 0) {
+
+            cmd = Eat_String(cmd);
+
+            force_children_on_this_program = TRUE;
 
         //
         // Command line switch /hide_window
@@ -996,6 +1074,33 @@ int Terminate_All_Processes(BOOL all_boxes)
 
 
 //---------------------------------------------------------------------------
+// Unmount_All_Boxes
+//---------------------------------------------------------------------------
+
+
+int Unmount_All_Boxes(BOOL all_boxes)
+{
+    if (all_boxes) {
+
+        int index = -1;
+        while (1) {
+            index = SbieApi_EnumBoxes(index, BoxName);
+            if (index == -1)
+                break;
+            SbieDll_Unmount(BoxName);
+        }
+
+    } else {
+
+        Validate_Box_Name();
+        SbieDll_Unmount(BoxName);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+
+//---------------------------------------------------------------------------
 // Program_Start
 //---------------------------------------------------------------------------
 
@@ -1022,7 +1127,7 @@ int Program_Start(void)
     }
 
     //
-    // copy input command line, minus leading and tailing spaces
+    // copy input command line, minus leading and trailing spaces
     //
 
     while (ChildCmdLine && *ChildCmdLine == L' ')
@@ -1042,14 +1147,19 @@ int Program_Start(void)
     // change to target directory
     //
 
-    curdir = (WCHAR *)MyHeapAlloc(1024 * sizeof(WCHAR));
-    if (GetEnvironmentVariable(
-                    L"00000000_" SBIE L"_CURRENT_DIRECTORY", curdir, 1020)) {
+    if (!ChildWrkDir) {
+        curdir = (WCHAR*)MyHeapAlloc(1024 * sizeof(WCHAR));
+        if (GetEnvironmentVariable(
+            L"00000000_" SBIE L"_CURRENT_DIRECTORY", curdir, 1020)) {
 
-        SetCurrentDirectory(curdir);
-        SetEnvironmentVariable(
-                    L"00000000_" SBIE L"_CURRENT_DIRECTORY", NULL);
+            ChildWrkDir = curdir;
+            SetEnvironmentVariable(
+                L"00000000_" SBIE L"_CURRENT_DIRECTORY", NULL);
+        }
     }
+
+    if(ChildWrkDir)
+        SetCurrentDirectory(ChildWrkDir);
 
     //
     // service programs expect to be started by CreateProcess, and may not
@@ -1106,7 +1216,7 @@ int Program_Start(void)
         shExecInfo.cbSize = sizeof(SHELLEXECUTEINFO);
         shExecInfo.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_DOENVSUBST
                          | SEE_MASK_FLAG_DDEWAIT | SEE_MASK_NOZONECHECKS;
-        if (wait_for_process || keep_alive)
+        if (wait_for_process || keep_alive || force_children_on_this_program)
             shExecInfo.fMask |= SEE_MASK_NOCLOSEPROCESS;
         shExecInfo.hwnd = NULL;
         shExecInfo.lpVerb = NULL;
@@ -1220,8 +1330,8 @@ int Program_Start(void)
             WCHAR *parms = Eat_String(cmdline);
             if (parms && *parms) {
 
-                WCHAR *cmd2 = MyHeapAlloc(cmdline_len * sizeof(WCHAR));
-                WCHAR *arg2 = MyHeapAlloc(cmdline_len * sizeof(WCHAR));
+                WCHAR *cmd2 = MyHeapAlloc((cmdline_len + 1) * sizeof(WCHAR));
+                WCHAR *arg2 = MyHeapAlloc((cmdline_len + 1) * sizeof(WCHAR));
 
                 wcsncpy(cmd2, cmdline, parms - cmdline);
                 cmd2[parms - cmdline] = L'\0';
@@ -1250,6 +1360,8 @@ int Program_Start(void)
 
         if (ok && (wait_for_process || keep_alive))
             hNewProcess = shExecInfo.hProcess;
+        else if(ok && force_children_on_this_program)
+            pi.dwProcessId = GetProcessId(shExecInfo.hProcess);
 
         if (! ok) {
 
@@ -1277,9 +1389,16 @@ int Program_Start(void)
     // we know for sure that SandboxieRpcSs has opened it
     //
 
-    if (ok && (! disable_force_on_this_program)) {
+    if (ok) {
 
-        SbieDll_StartCOM(FALSE);
+        if (force_children_on_this_program) {
+
+            SbieApi_Call(API_FORCE_CHILDREN, 2, pi.dwProcessId, BoxName);
+
+        } else if (!disable_force_on_this_program) {
+
+            SbieDll_StartCOM(FALSE);
+        }
     }
 
     //
@@ -1308,7 +1427,9 @@ int Program_Start(void)
             }
         }
 
-    } else if (GetModuleHandle(L"protect.dll")) {
+    } 
+    // $Workaround$ - 3rd party fix
+    else if (GetModuleHandle(L"protect.dll")) {
 
         //
         // hack for FortKnox firewall -- keep Start.exe around for a few
@@ -1550,6 +1671,44 @@ void StartAllAutoRunEntries()
 
 
 //---------------------------------------------------------------------------
+// GetParentPIDAndName
+//---------------------------------------------------------------------------
+
+extern "C" WINBASEAPI BOOL WINAPI QueryFullProcessImageNameW(HANDLE hProcess, DWORD dwFlags, LPWSTR lpExeName, PDWORD lpdwSize);
+
+DWORD GetParentPIDAndName(DWORD ProcessID, LPTSTR lpszBuffer_Parent_Name) 
+{
+	HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ProcessID);
+	if (!ProcessID) 
+		return 0;
+
+	PROCESS_BASIC_INFORMATION pbi;
+	NTSTATUS status = NtQueryInformationProcess(hProcess, ProcessBasicInformation, (LPVOID)&pbi, sizeof(pbi), NULL);
+
+	DWORD dwParentID = 0;
+	if (NT_SUCCESS(status)) {
+		
+		dwParentID = (DWORD)pbi.InheritedFromUniqueProcessId;
+
+		if (NULL != lpszBuffer_Parent_Name) {
+
+			HANDLE hParentProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, dwParentID);
+            if (hParentProcess) {
+
+                DWORD dwSize;
+                BOOL ret = QueryFullProcessImageNameW(hParentProcess, 0, lpszBuffer_Parent_Name, &dwSize);
+
+                CloseHandle(hParentProcess);
+            }
+		}
+	}
+
+	CloseHandle(hProcess);
+	return dwParentID;
+}
+
+
+//---------------------------------------------------------------------------
 // RestartInSandbox
 //---------------------------------------------------------------------------
 
@@ -1582,7 +1741,7 @@ ULONG RestartInSandbox(void)
     // build command line.  note that we pass the current directory as an
     // environment variable which will be queried by Program_Start.  this
     // is because SbieSvc ProcessServer (used by SbieDll_RunSandboxed)
-    // does not necssarily share our dos device map, and will not be able
+    // does not necessarily share our dos device map, and will not be able
     // to change to a drive letter that isn't in its dos device map
     //
 
@@ -1608,6 +1767,25 @@ ULONG RestartInSandbox(void)
     wcscpy(ptr, ChildCmdLine);
 
     SbieApi_GetHomePath(NULL, 0, dir, 1020);
+
+    //
+    //
+    //
+
+	if (SbieApi_QueryConfBool(BoxName, L"AlertBeforeStart", FALSE)) {
+
+        WCHAR parent_image[1020] = L"";
+		GetParentPIDAndName(GetCurrentProcessId(), parent_image);
+
+		WCHAR* text = SbieDll_FormatMessage1(MSG_3198, BoxName);
+		if (MessageBoxW(NULL, text, Sandboxie_Start_Title, MB_YESNO) == IDNO)
+			return EXIT_FAILURE;
+
+        if (_wcsnicmp(parent_image, dir, wcslen(dir)) != 0) {
+            if (MessageBoxW(NULL, SbieDll_FormatMessage0(3199), Sandboxie_Start_Title, MB_YESNO) == IDNO)
+                return EXIT_FAILURE;
+        }
+	}
 
     //
     //
@@ -1746,8 +1924,9 @@ int __stdcall WinMainCRTStartup(
 
                 ULONG NewState = DISABLE_JUST_THIS_PROCESS;
                 SbieApi_DisableForceProcess(&NewState, NULL);
-                return die(Program_Start());
             }
+            if (disable_force_on_this_program || force_children_on_this_program)
+                return die(Program_Start());
         }
 
         return die(RestartInSandbox());
@@ -1762,6 +1941,18 @@ int __stdcall WinMainCRTStartup(
         if (display_run_dialog) {
             MyCoInitialize();
             ChildCmdLine = DoRunDialog(GetModuleHandle(NULL));
+            if (ChildCmdLine)
+            {
+                PWSTR pBegin = ChildCmdLine;
+                PWSTR pEnd = Eat_String(ChildCmdLine);
+                if (*ChildCmdLine == L'\"' && pEnd - ChildCmdLine > 2)
+                    pBegin++;
+				while (pBegin < --pEnd && *pEnd != L'\\');
+				
+				ChildWrkDir = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, (pEnd - pBegin + 2) * sizeof(WCHAR));
+				wmemcpy(ChildWrkDir, pBegin, pEnd - pBegin + 1);
+				ChildWrkDir[pEnd - pBegin] = L'\0';
+            }
         } else if (execute_open_with) {
             MyCoInitialize();
             WCHAR* CmdLine = DoRunDialog(GetModuleHandle(NULL));

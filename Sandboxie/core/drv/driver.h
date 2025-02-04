@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -97,7 +98,8 @@ extern P_NtSetInformationToken          ZwSetInformationToken;
 #endif // OLD_DDK
 
 #ifdef _M_ARM64
-NTSTATUS Sbie_CallZwServiceFunction_asm(UINT_PTR arg1, UINT_PTR arg2, UINT_PTR arg3, UINT_PTR arg4, UINT_PTR arg5, UINT_PTR arg6, UINT_PTR arg7, UINT_PTR arg8, 
+NTSTATUS Sbie_CallZwServiceFunction_asm(
+    UINT_PTR arg1, UINT_PTR arg2, UINT_PTR arg3, UINT_PTR arg4, UINT_PTR arg5, UINT_PTR arg6, UINT_PTR arg7, UINT_PTR arg8, 
     UINT_PTR arg9, UINT_PTR arg10, UINT_PTR arg11, UINT_PTR arg12, UINT_PTR arg13, UINT_PTR arg14, UINT_PTR arg15, UINT_PTR arg16, UINT_PTR arg17, UINT_PTR arg18, UINT_PTR arg19,
     UINT_PTR svc_num);
 
@@ -105,6 +107,11 @@ extern void*                            Driver_KiServiceInternal;
 extern USHORT                           ZwCreateToken_num;
 extern USHORT                           ZwCreateTokenEx_num;
 #else
+#ifdef _WIN64
+NTSTATUS Sbie_CallFunction_asm(VOID* func, 
+    UINT_PTR arg1, UINT_PTR arg2, UINT_PTR arg3, UINT_PTR arg4, UINT_PTR arg5, UINT_PTR arg6, UINT_PTR arg7, UINT_PTR arg8, 
+    UINT_PTR arg9, UINT_PTR arg10, UINT_PTR arg11, UINT_PTR arg12, UINT_PTR arg13, UINT_PTR arg14, UINT_PTR arg15, UINT_PTR arg16, UINT_PTR arg17, UINT_PTR arg18, UINT_PTR arg19);
+#endif
 extern P_NtCreateToken                  ZwCreateToken;
 extern P_NtCreateTokenEx                ZwCreateTokenEx;
 #endif
@@ -115,9 +122,6 @@ extern P_NtCreateTokenEx                ZwCreateTokenEx;
 
 
 NTSTATUS Driver_Api_Unload(PROCESS *proc, ULONG64 *parms);
-
-ULONG Driver_GetRegDword(
-    const WCHAR *KeyPath, const WCHAR *ValueName);
 
 
 //---------------------------------------------------------------------------
@@ -137,6 +141,7 @@ extern WCHAR *Driver_Version;
 
 extern ULONG Driver_OsVersion;
 extern ULONG Driver_OsBuild;
+extern BOOLEAN Driver_OsTestSigning;
 
 extern POOL *Driver_Pool;
 

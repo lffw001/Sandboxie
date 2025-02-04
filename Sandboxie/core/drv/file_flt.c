@@ -64,7 +64,8 @@ static NTSTATUS File_CreateOperation(
 
 static NTSTATUS File_RenameOperation(
     PROCESS *proc,
-    FLT_IO_PARAMETER_BLOCK *Iopb);
+    FLT_IO_PARAMETER_BLOCK *Iopb,
+    BOOLEAN LinkOp);
 
 static NTSTATUS File_QueryTeardown(
     PCFLT_RELATED_OBJECTS FltObjects,
@@ -357,9 +358,13 @@ _FX FLT_PREOP_CALLBACK_STATUS File_PreOperation(
     } else if (Iopb->MajorFunction == IRP_MJ_SET_INFORMATION) {
         // we allow IRP_MJ_SET_INFORMATION to pass except for these 3 
         if ((Iopb->Parameters.SetFileInformation.FileInformationClass != FileRenameInformation) &&
+            (Iopb->Parameters.SetFileInformation.FileInformationClass != FileRenameInformationEx) &&
+
             (Iopb->Parameters.SetFileInformation.FileInformationClass != FileLinkInformation) &&
             (Iopb->Parameters.SetFileInformation.FileInformationClass != FileLinkInformationEx) &&
-            (Iopb->Parameters.SetFileInformation.FileInformationClass != FileRenameInformationEx))
+
+            (Iopb->Parameters.SetFileInformation.FileInformationClass != FileHardLinkInformation) &&
+            (Iopb->Parameters.SetFileInformation.FileInformationClass != FileHardLinkFullIdInformation))
 
             goto finish;
 
@@ -401,8 +406,7 @@ _FX FLT_PREOP_CALLBACK_STATUS File_PreOperation(
                 if (ulOwnerPid)
                 {
                     proc = Process_Find((HANDLE)ulOwnerPid, NULL);  // is this a sandboxed process?
-                    if (proc && proc != PROCESS_TERMINATED &&
-                        !proc->ipc_allowSpoolerPrintToFile)   // if process specifically allowed to use spooler print to file, we can skip everything below
+                    if (proc && !proc->terminated && !proc->ipc_allowSpoolerPrintToFile)   // if process specifically allowed to use spooler print to file, we can skip everything below
                     {
                         FLT_FILE_NAME_INFORMATION   *pTargetFileNameInfo = NULL;
                         BOOLEAN     result = FALSE;
@@ -478,7 +482,7 @@ check:
     }
 
     //
-    // check if there are any protected root folders and restict the access to
+    // check if there are any protected root folders and restrict the access to them
     //
 
     if (Iopb->MajorFunction == IRP_MJ_CREATE && File_ProtectedRoots.count != 0 && Data->Iopb->TargetFileObject) {
@@ -490,6 +494,8 @@ check:
         if (NT_SUCCESS(status)) {
 
             //DbgPrint("IRP_MJ_CREATE: %S\n", Name->Name.Buffer);
+
+            BOOLEAN protect_root = FALSE;
 
             KIRQL irql;
             KeRaiseIrql(APC_LEVEL, &irql);
@@ -503,15 +509,9 @@ check:
                     && _wcsnicmp(Name->Name.Buffer, root->file_root, root->file_root_len) == 0
                     ) {
 
-                    status = STATUS_ACCESS_DENIED;
+                    //DbgPrint("IRP_MJ_CREATE: %S\n", root->file_root);
 
-                    if (proc && !proc->bHostInject) {
-                        if (proc->box->key_path_len / sizeof(WCHAR) == root->reg_root_len + 1 &&
-                            _wcsnicmp(proc->box->key_path, root->reg_root, root->reg_root_len) == 0) {
-                            status = STATUS_SUCCESS; // its the allowed box
-                        }
-                    }
-
+                    protect_root = TRUE;
                     break;
                 }
 
@@ -521,24 +521,45 @@ check:
             ExReleaseResourceLite(File_ProtectedRootsLock);
             KeLowerIrql(irql);
 
-            if (!NT_SUCCESS(status)) {
+            if (protect_root) {
 
-                if (PsGetCurrentProcessId() == Api_ServiceProcessId)
-                    status = STATUS_SUCCESS; // always allow the service
-                else if(Session_GetLeadSession(PsGetCurrentProcessId()) != 0)
-                    status = STATUS_SUCCESS; // allow the session leader    
+                HANDLE cur_pid = PsGetCurrentProcessId();
+
+                if (Util_IsSystemProcess(cur_pid, "csrss.exe") // csrss.exe needs access to binaries of starting up processes.
+                    || cur_pid == Api_ServiceProcessId // always allow the service
+                    || Session_GetLeadSession(cur_pid) != 0) // allow the session leader
+                    protect_root = FALSE;
                 else
+                {
+                    PROCESS *cur_proc = proc;
+                    if (!cur_proc && ExGetPreviousMode() == KernelMode)
+                        cur_proc = Process_Find(cur_pid, NULL);
 
-                if (Conf_Get_Boolean(NULL, L"NotifyBoxProtected", 0, FALSE)) {
+                    if (cur_proc && !cur_proc->bHostInject) {
+                        if (cur_proc->box->key_path_len / sizeof(WCHAR) == root->reg_root_len + 1 &&
+                            _wcsnicmp(cur_proc->box->key_path, root->reg_root, root->reg_root_len) == 0) {
+                            protect_root = FALSE; // its the allowed box
+                        }
+                    }
+                }
 
-                    void *nbuf = 0;
-                    ULONG nlen = 0;
-                    WCHAR *nptr = 0;
-                    Process_GetProcessName(Driver_Pool, (ULONG_PTR)PsGetCurrentProcessId(), &nbuf, &nlen, &nptr);
+                if (protect_root)
+                {
+                    status = STATUS_ACCESS_DENIED;
 
-                    Log_Msg_Process(MSG_1317, nptr, Name->Name.Buffer, -1, PsGetCurrentProcessId());
+                    Session_MonitorPut(MONITOR_FILE | MONITOR_DENY, Name->Name.Buffer, cur_pid);
 
-                    if (nbuf) Mem_Free(nbuf, nlen);
+                    if (Conf_Get_Boolean(NULL, L"NotifyRootProtected", 0, FALSE)) {
+
+                        void* nbuf = 0;
+                        ULONG nlen = 0;
+                        WCHAR* nptr = 0;
+                        Process_GetProcessName(Driver_Pool, (ULONG_PTR)cur_pid, &nbuf, &nlen, &nptr);
+
+                        Log_Msg_Process(MSG_1317, nptr, Name->Name.Buffer, -1, cur_pid);
+
+                        if (nbuf) Mem_Free(nbuf, nlen);
+                    }
                 }
             }
 
@@ -564,11 +585,13 @@ check:
         // Do not allow hard links outside the sandbox
         if (Iopb->Parameters.SetFileInformation.FileInformationClass == FileLinkInformation 
          || Iopb->Parameters.SetFileInformation.FileInformationClass == FileLinkInformationEx) {
+
+            /*
             // FILE_LINK_INFORMATION* FileInfo = (FILE_LINK_INFORMATION*)Iopb->Parameters.SetFileInformation.InfoBuffer;
             
             // For rename or link operations. If InfoBuffer->FileName contains a fully qualified file name, or if InfoBuffer->RootDirectory is non-NULL, 
             // this member is a file object pointer for the parent directory of the file that is the target of the operation. Otherwise it is NULL.
-            if (Iopb->Parameters.SetFileInformation.ParentOfTarget == NULL) {
+            //if (Iopb->Parameters.SetFileInformation.ParentOfTarget == NULL) {
 
                 FLT_FILE_NAME_INFORMATION   *pTargetFileNameInfo = NULL;
 
@@ -587,15 +610,20 @@ check:
                 if (pTargetFileNameInfo != NULL) {
                     FltReleaseFileNameInformation(pTargetFileNameInfo);
                 }
-            }
-            else if(!Box_IsBoxedPath(proc->box, file, &Iopb->Parameters.SetFileInformation.ParentOfTarget->FileName)) {
-                status = STATUS_ACCESS_DENIED;
-            }
-        }
-        else {
-            status = File_RenameOperation(proc, Iopb);
-        }
+            //}
+            //else if(!Box_IsBoxedPath(proc->box, file, &Iopb->Parameters.SetFileInformation.ParentOfTarget->FileName)) { // bug bug ParentOfTarget->FileName does not contain device path
+            //    status = STATUS_ACCESS_DENIED;
+            //}
+            */
 
+            status = File_RenameOperation(proc, Iopb, TRUE);
+        }
+        else if (Iopb->Parameters.SetFileInformation.FileInformationClass == FileRenameInformation 
+         || Iopb->Parameters.SetFileInformation.FileInformationClass == FileRenameInformationEx) {
+            status = File_RenameOperation(proc, Iopb, FALSE);
+        }
+        else
+            status = STATUS_ACCESS_DENIED;
     }
     else if (Iopb->MajorFunction == IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION) {
 
@@ -750,10 +778,10 @@ _FX NTSTATUS File_CreateOperation(
 
 _FX NTSTATUS File_RenameOperation(
     PROCESS *proc,
-    FLT_IO_PARAMETER_BLOCK *Iopb)
+    FLT_IO_PARAMETER_BLOCK *Iopb,
+    BOOLEAN LinkOp)
 {
     FLT_PARAMETERS *Parms;
-    FILE_RENAME_INFORMATION *info;
     PFILE_OBJECT FileObject;
     UNICODE_STRING FileName;
     MY_CONTEXT MyContext;
@@ -764,17 +792,36 @@ _FX NTSTATUS File_RenameOperation(
 
     Parms = &Iopb->Parameters;
 
-    info = (FILE_RENAME_INFORMATION *)Parms->SetFileInformation.InfoBuffer;
+    if(LinkOp) {
 
-#ifdef _M_ARM64
-    if (! MmIsAddressValid(info)) // todo: arm64 // fix-me: why does this happen?
-        return STATUS_ACCESS_DENIED;
-#endif
+        FILE_LINK_INFORMATION *infoL;
 
-    FileObject = Parms->SetFileInformation.ParentOfTarget;
+        infoL = (FILE_LINK_INFORMATION *)Parms->SetFileInformation.InfoBuffer;
+    
+        FileObject = Parms->SetFileInformation.ParentOfTarget;
 
-    if ((! FileObject) || (! info) || (! info->FileNameLength))
-        return STATUS_ACCESS_DENIED;
+        if ((! FileObject) || (! infoL) || (! infoL->FileNameLength))
+            return STATUS_ACCESS_DENIED;
+
+        FileName.Length = (USHORT)infoL->FileNameLength;
+        FileName.MaximumLength = FileName.Length;
+        FileName.Buffer = infoL->FileName;
+
+    } else {
+
+        FILE_RENAME_INFORMATION *infoR;
+
+        infoR = (FILE_RENAME_INFORMATION *)Parms->SetFileInformation.InfoBuffer;
+
+        FileObject = Parms->SetFileInformation.ParentOfTarget;
+
+        if ((! FileObject) || (! infoR) || (! infoR->FileNameLength))
+            return STATUS_ACCESS_DENIED;
+
+        FileName.Length = (USHORT)infoR->FileNameLength;
+        FileName.MaximumLength = FileName.Length;
+        FileName.Buffer = infoR->FileName;
+    }
 
     //
     // if the target directory specifies just a filename (no leading slash)
@@ -801,10 +848,6 @@ _FX NTSTATUS File_RenameOperation(
     //
     // call the generic parser function
     //
-
-    FileName.Length = (USHORT)info->FileNameLength;
-    FileName.MaximumLength = FileName.Length;
-    FileName.Buffer = info->FileName;
 
     memzero(&MyContext, sizeof(MyContext));
     MyContext.HaveContext = TRUE;
@@ -1034,7 +1077,7 @@ _FX NTSTATUS File_Api_UnprotectRoot(PROCESS* proc, ULONG64* parms)
 
         PROTECTED_ROOT *next_root = List_Next(root);
 
-        if (root->reg_root_len = reg_root_len && _wcsicmp(root->reg_root, reg_root) == 0) {
+        if (root->reg_root_len == reg_root_len && _wcsicmp(root->reg_root, reg_root) == 0) {
 
             List_Remove(&File_ProtectedRoots, root);
 

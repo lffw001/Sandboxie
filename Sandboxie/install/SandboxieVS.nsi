@@ -954,6 +954,10 @@ NoTrendMicro:
 
 Upgrade:
 
+    ; Delete obsolete files
+    Delete "$INSTDIR\${SBIEDRV_SYS}.rc4"
+    Delete "$INSTDIR\${SBIEDRV_SYS}.w10"
+    Delete "$INSTDIR\${SBIEINI_EXE}.sig"
     Call DeleteProductKey
     Call DeleteSystemKeys
     Call DeleteShortCuts
@@ -1092,6 +1096,8 @@ WriteLoop:
 
     File /oname=${SBIEINI_EXE} "${BIN_ROOT}\SbieIni.exe"
 
+    File "whatsnew.html"
+
     ;File "${BIN_ROOT}\License.exe"
 
     File "LICENSE.TXT"
@@ -1139,7 +1145,7 @@ WriteOk:
 SkipCopyInstaller:
 
     ;
-    ; Delete old files
+    ; Delete obsolete files
     ;
 
     Delete "$DESKTOP\${PRODUCT_NAME} Quick Launch.lnk"
@@ -1178,8 +1184,9 @@ Function DeleteProgramFiles
     Delete "$INSTDIR\${SBIEMSG_DLL}"
 
     Delete "$INSTDIR\${SBIEDRV_SYS}"
-    Delete "$INSTDIR\${SBIEDRV_SYS}.rc4" ; leftover
-    Delete "$INSTDIR\${SBIEDRV_SYS}.w10" ; leftover
+    ; Delete obsolete files
+    Delete "$INSTDIR\${SBIEDRV_SYS}.rc4"
+    Delete "$INSTDIR\${SBIEDRV_SYS}.w10"
 
     Delete "$INSTDIR\KmdUtil.exe"
     Delete "$INSTDIR\UpdUtil.exe"
@@ -1208,7 +1215,10 @@ Function DeleteProgramFiles
     Delete "$INSTDIR\Manifest2.txt"
 
     Delete "$INSTDIR\${SBIEINI_EXE}"
-    Delete "$INSTDIR\${SBIEINI_EXE}.sig" ; leftover
+    ; Delete obsolete file
+    Delete "$INSTDIR\${SBIEINI_EXE}.sig"
+
+    Delete "$INSTDIR\whatsnew.html"
 
     Delete "$INSTDIR\LICENSE.EXE"
 
@@ -1680,7 +1690,8 @@ Function .onGUIEnd
 
     StrCmp $LaunchControl "Y" 0 Done
 
-    ExecWait '"$INSTDIR\${START_EXE}" run_sbie_ctrl' $0
+;    ExecWait '"$INSTDIR\${START_EXE}" run_sbie_ctrl' $0
+    ExecWait '"$INSTDIR\${START_EXE}" open_agent:"${SBIECTRL_EXE} /open /sync /postsetup"' $0
 
 Done:
 

@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC
- * Copyright 2020-2021 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -322,14 +322,14 @@ _FX BOOLEAN Config_InitPatternList(const WCHAR* boxname, const WCHAR* setting, L
         if (!NT_SUCCESS(status))
             break;
         ++index;
-
-        if (dos) 
-            SbieDll_TranslateNtToDosPath(conf_buf);
         
         ULONG level;
         WCHAR* value = Config_MatchImageAndGetValue(conf_buf, Dll_ImageName, &level);
         if (value)
         {
+            if (dos && *value != L'*')
+                SbieDll_TranslateNtToDosPath(value);
+
             pat = Pattern_Create(Dll_Pool, value, TRUE, level);
 
             List_Insert_After(list, NULL, pat);
@@ -545,6 +545,17 @@ BOOLEAN SbieDll_MatchImage(const WCHAR* pat_str, const WCHAR* test_str, const WC
 
 BOOLEAN SbieDll_GetStringForStringList(const WCHAR* string, const WCHAR* boxname, const WCHAR* setting, WCHAR* value, ULONG value_size)
 {
+    return SbieDll_GetStringsForStringList(string, boxname, setting, 0, value, value_size);
+}
+
+
+//---------------------------------------------------------------------------
+// SbieDll_GetStringsForStringList
+//---------------------------------------------------------------------------
+
+
+SBIEDLL_EXPORT  BOOLEAN SbieDll_GetStringsForStringList(const WCHAR* string, const WCHAR* boxname, const WCHAR* setting, int pos, WCHAR* value, ULONG value_size)
+{
     BOOLEAN found = FALSE;
     WCHAR buf[CONF_LINE_LEN];
     ULONG index = 0;
@@ -557,15 +568,21 @@ BOOLEAN SbieDll_GetStringForStringList(const WCHAR* string, const WCHAR* boxname
                 // check specific value
                 *ptr++ = L'\0';
                 if (_wcsicmp(buf, string) == 0) {
-                    wcscpy_s(value, value_size / sizeof(WCHAR), ptr);
-                    found = TRUE;
-                    break;
+                    if (pos == 0) {
+                        wcscpy_s(value, value_size / sizeof(WCHAR), ptr);
+                        found = TRUE;
+                        break;
+                    }
+                    pos--;
                 }
             }
             else if (!found) {
                 // default value
-                wcscpy_s(value, value_size / sizeof(WCHAR), buf);
-                found = TRUE;
+                if (pos == 0) {
+                    wcscpy_s(value, value_size / sizeof(WCHAR), buf);
+                    found = TRUE;
+                }
+                pos--;
             }
         }
         else if (status != STATUS_BUFFER_TOO_SMALL)
@@ -589,6 +606,32 @@ BOOLEAN SbieDll_CheckStringInList(const WCHAR* string, const WCHAR* boxname, con
         ++index;
         if (NT_SUCCESS(status)) {
             if (_wcsicmp(buf, string) == 0) {
+                return TRUE;
+            }
+        }
+        else if (status != STATUS_BUFFER_TOO_SMALL)
+            break;
+    }
+    return FALSE;
+}
+
+
+//---------------------------------------------------------------------------
+// SbieDll_CheckStringInListA
+//---------------------------------------------------------------------------
+
+
+BOOLEAN SbieDll_CheckStringInListA(const char* string, const WCHAR* boxname, const WCHAR* setting)
+{
+    WCHAR buf[66];
+    ULONG index = 0;
+    while (1) {
+        NTSTATUS status = SbieApi_QueryConfAsIs(boxname, setting, index, buf, 64 * sizeof(WCHAR));
+        ++index;
+        if (NT_SUCCESS(status)) {
+            WCHAR* ptr = buf;
+            for (const char* tmp = string; *ptr && *tmp && *ptr == *tmp; ptr++, tmp++);
+            if (*ptr == L'\0') {
                 return TRUE;
             }
         }

@@ -183,6 +183,7 @@
       <AdditionalDependencies>SbieDll.lib;ntdll.lib;kernel32.lib;user32.lib;Advapi32.lib;psapi.lib;Ole32.lib;crypt32.lib;Secur32.lib;Userenv.lib;Gdi32.lib;Netapi32.lib;wtsapi32.lib;rpcrt4.lib;bcrypt.lib</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>
       </IgnoreAllDefaultLibraries>
+      <CETCompat>true</CETCompat>
     </Link>
     <ResourceCompile>
       <PreprocessorDefinitions>
@@ -200,6 +201,7 @@
       <AdditionalDependencies>SbieDll.lib;ntdll.lib;kernel32.lib;user32.lib;Advapi32.lib;psapi.lib;Ole32.lib;crypt32.lib;Secur32.lib;Userenv.lib;Gdi32.lib;Netapi32.lib;wtsapi32.lib;rpcrt4.lib;bcrypt.lib</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>
       </IgnoreAllDefaultLibraries>
+      <CETCompat>true</CETCompat>
     </Link>
     <ResourceCompile>
       <PreprocessorDefinitions>
@@ -252,6 +254,7 @@
       <AdditionalDependencies>SbieDll.lib;ntdll.lib;kernel32.lib;user32.lib;Advapi32.lib;psapi.lib;Ole32.lib;crypt32.lib;Secur32.lib;Userenv.lib;Gdi32.lib;Netapi32.lib;wtsapi32.lib;rpcrt4.lib;bcrypt.lib</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>
       </IgnoreAllDefaultLibraries>
+      <CETCompat>true</CETCompat>
     </Link>
     <ResourceCompile>
       <PreprocessorDefinitions>
@@ -268,6 +271,7 @@
       <AdditionalDependencies>SbieDll.lib;ntdll.lib;kernel32.lib;user32.lib;Advapi32.lib;psapi.lib;Ole32.lib;crypt32.lib;Secur32.lib;Userenv.lib;Gdi32.lib;Netapi32.lib;wtsapi32.lib;rpcrt4.lib;bcrypt.lib</AdditionalDependencies>
       <IgnoreAllDefaultLibraries>
       </IgnoreAllDefaultLibraries>
+      <CETCompat>true</CETCompat>
     </Link>
     <ResourceCompile>
       <PreprocessorDefinitions>
@@ -369,6 +373,16 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64EC'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\..\common\rc4.c">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|ARM64EC'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64EC'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|ARM64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\..\common\stream.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|Win32'">true</ExcludedFromBuild>
@@ -378,6 +392,16 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64EC'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\..\common\str_util.c">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|ARM64EC'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64EC'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|ARM64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieRelease|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='SbieDebug|x64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\..\common\verify.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='SbieRelease|Win32'">NotUsing</PrecompiledHeader>
@@ -494,6 +518,8 @@
     <ClCompile Include="includes.cpp" />
     <ClCompile Include="iphlpserver.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="MountManager.cpp" />
+    <ClCompile Include="MountManagerHelpers.cpp" />
     <ClCompile Include="namedpipeserver.cpp" />
     <ClCompile Include="netapiserver.cpp" />
     <ClCompile Include="pipeserver.cpp" />
@@ -515,6 +541,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='SbieDebug|ARM64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="terminalserver.cpp" />
+    <ClCompile Include="UserServer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\common\ini.h" />
@@ -581,6 +608,8 @@
     <ClInclude Include="iphlpserver.h" />
     <ClInclude Include="iphlpwire.h" />
     <ClInclude Include="misc.h" />
+    <ClInclude Include="MountManager.h" />
+    <ClInclude Include="MountManagerWire.h" />
     <ClInclude Include="msgids.h" />
     <ClInclude Include="namedpipeserver.h" />
     <ClInclude Include="namedpipewire.h" />
@@ -600,6 +629,8 @@
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="terminalserver.h" />
     <ClInclude Include="terminalwire.h" />
+    <ClInclude Include="UserServer.h" />
+    <ClInclude Include="UserWire.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />

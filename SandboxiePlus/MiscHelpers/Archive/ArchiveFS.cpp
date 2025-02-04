@@ -9,6 +9,7 @@
 class C7zFileEngineIterator : public QAbstractFileEngineIterator
 {
 public:
+#if QT_VERSION < QT_VERSION_CHECK(6, 8, 0)
     C7zFileEngineIterator(QDir::Filters filters, const QStringList& filterNames, 
         const QStringList& allEntries)
         : QAbstractFileEngineIterator(filters, filterNames), entries(allEntries), index(0) {}
@@ -25,7 +26,21 @@ public:
     {
         return index < entries.size();
     }
+#else
+    C7zFileEngineIterator(const QString &path, QDir::Filters filters, const QStringList& filterNames, 
+        const QStringList& allEntries)
+        : QAbstractFileEngineIterator(path, filters, filterNames), entries(allEntries), index(0) {}
+    ~C7zFileEngineIterator() {}
 
+    bool advance() override
+    {
+        if (index >= entries.size())
+            return false;
+        ++index;
+        return true;
+    }
+#endif
+    
     QString currentFileName() const override
     {
         if (index <= 0 || index > entries.size())
@@ -164,7 +179,7 @@ QAbstractFileEngine::Iterator *C7zFileEngine::beginEntryList(QDir::Filters filte
     for (int i = 0; i < _pArchive->FileCount(); i++) {
         QString Path = _pArchive->FileProperty(i, "Path").toString();
         if (!_filename.isEmpty()) {
-            if (!Path.startsWith(_filename))
+            if (!Path.startsWith(QString(_filename).replace("/", "\\")))
                 continue;
             Path = Path.mid(_filename.length() + 1);
         }
@@ -172,7 +187,11 @@ QAbstractFileEngine::Iterator *C7zFileEngine::beginEntryList(QDir::Filters filte
             allEntries.append(Path);
     }
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 8, 0)
     return new C7zFileEngineIterator(filters, filterNames, allEntries);
+#else
+    return new C7zFileEngineIterator("", filters, filterNames, allEntries);
+#endif
 }
 
 QAbstractFileEngine::FileFlags C7zFileEngine::fileFlags(FileFlags type) const
@@ -182,14 +201,38 @@ QAbstractFileEngine::FileFlags C7zFileEngine::fileFlags(FileFlags type) const
 
 QString C7zFileEngine::fileName(FileName file) const
 {
-    return _filename;
+	auto filename = Split2(_filename, "/", true);
+	if (filename.second.isEmpty()) {
+		filename.second = filename.first;
+		filename.first.clear();
+	}
+	switch (file)
+	{
+	case BaseName:
+	case AbsoluteName:
+		return filename.second;
+	case PathName:
+	case AbsolutePathName:
+		return filename.first;
+	//default:
+	//case DefaultName:
+	}
+	return _filename;
 }
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 7, 0)
 QDateTime C7zFileEngine::fileTime(FileTime time) const
+#else
+QDateTime C7zFileEngine::fileTime(QFile::FileTime time) const
+#endif
 {
     switch (time)
     {
+#if QT_VERSION < QT_VERSION_CHECK(6, 7, 0)
     case QAbstractFileEngine::ModificationTime:
+#else
+    case QFile::FileModificationTime:
+#endif
     default:
         return _datetime;
         break;
@@ -198,8 +241,10 @@ QDateTime C7zFileEngine::fileTime(FileTime time) const
 
 void C7zFileEngine::setFileName(const QString& file)
 {
-    int pos = file.indexOf(":") + 2;
+    int pos = file.indexOf(":") + 1;
     _filename = file.mid(pos);
+    while (_filename.left(1) == "\\" || _filename.left(1) == "/")
+        _filename.remove(0, 1);
 
     if (_filename.isEmpty()) { // root
         _flags = ExistsFlag | DirectoryType | ReadOwnerPerm | ReadUserPerm | ReadGroupPerm | ReadOtherPerm;
@@ -268,22 +313,37 @@ bool C7zFileEngine::supportsExtension(Extension extension) const
 // C7zFileEngineHandler
 // 
 
-C7zFileEngineHandler::C7zFileEngineHandler(const QString& ArchivePath, const QString& Scheme, QObject* parent)
+C7zFileEngineHandler::C7zFileEngineHandler(const QString& Scheme, QObject* parent)
     : QObject(parent), m_pArchive(NULL)
 {
-    CArchive* pArchive = new CArchive(ArchivePath);
-    if (pArchive->Open() > 0)
-        m_pArchive = pArchive;
-    else
-        delete pArchive;
     m_Scheme = Scheme + ":";
 }
 
 C7zFileEngineHandler::~C7zFileEngineHandler()
 {
-    delete m_pArchive;
+    Close();
 }
 
+bool C7zFileEngineHandler::Open(const QString& ArchivePath)
+{
+    Close();
+
+    CArchive* pArchive = new CArchive(ArchivePath);
+    if (pArchive->Open() != ERR_7Z_OK) {
+        delete pArchive;
+        return false;
+    }
+    m_pArchive = pArchive;
+    return true;
+}
+
+void C7zFileEngineHandler::Close()
+{
+    delete m_pArchive;
+    m_pArchive = NULL;
+}
+
+#if QT_VERSION < QT_VERSION_CHECK(6, 8, 0)
 QAbstractFileEngine* C7zFileEngineHandler::create(const QString& filename) const
 {
     if (m_pArchive && filename.startsWith(m_Scheme))
@@ -291,3 +351,12 @@ QAbstractFileEngine* C7zFileEngineHandler::create(const QString& filename) const
 
     return NULL;
 }
+#else
+std::unique_ptr<QAbstractFileEngine> C7zFileEngineHandler::create(const QString& filename) const
+{
+    if (m_pArchive && filename.startsWith(m_Scheme))
+        return std::unique_ptr<QAbstractFileEngine>(new C7zFileEngine(filename, m_pArchive, &m_Mutex));
+
+    return std::unique_ptr<QAbstractFileEngine>();
+}
+#endif

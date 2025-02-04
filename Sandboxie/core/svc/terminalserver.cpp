@@ -528,7 +528,8 @@ MSG_HEADER *TerminalServer::GetUserToken(MSG_HEADER *msg)
 
     } else {
 
-        WCHAR boxname[48] = { 0 };
+        WCHAR boxname[BOXNAME_COUNT];
+        boxname[0] = L'\0';
         SbieApi_QueryProcess(idProcess, boxname, NULL, NULL, NULL);
 
         HANDLE hCallerProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, (ULONG)(ULONG_PTR)idProcess);
@@ -542,8 +543,11 @@ MSG_HEADER *TerminalServer::GetUserToken(MSG_HEADER *msg)
                 
                 HANDLE hFilteredToken = NULL;
 
+                ULONG64 ProcessFlags = SbieApi_QueryProcessInfo(idProcess, 0);
+                BOOLEAN CompartmentMode = (ProcessFlags & SBIE_FLAG_APP_COMPARTMENT) != 0;
+
                 // OriginalToken BEGIN
-                if (!SbieApi_QueryConfBool(boxname, L"NoSecurityIsolation", FALSE) && !SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)
+                if (!CompartmentMode && !SbieApi_QueryConfBool(boxname, L"OriginalToken", FALSE)
                 // OriginalToken END
                 // UnfilteredToken BEGIN
                  && !SbieApi_QueryConfBool(boxname, L"UnfilteredToken", FALSE))

@@ -97,6 +97,7 @@ endif
 ;----------------------------------------------------------------------------
 
 ifdef _WIN64
+ifdef XP_SUPPORT
 
 EXTERN Process_FindSandboxed : proc
 
@@ -129,6 +130,7 @@ Process_FindSandboxed64 PROC FRAME
 
 Process_FindSandboxed64 ENDP
 
+endif
 endif
 
 ;----------------------------------------------------------------------------
@@ -229,6 +231,43 @@ endif
 ;----------------------------------------------------------------------------
 
 ifdef _WIN64
+Sbie_CallFunction_asm PROC FRAME
+
+    mov         qword ptr [rsp+20h],r9
+    mov         qword ptr [rsp+18h],r8
+    mov         qword ptr [rsp+10h],rdx
+    mov         qword ptr [rsp+8],rcx
+
+    push        rsi
+    .pushreg    rsi
+    push        rdi
+    .pushreg    rdi
+    sub         rsp,0A8h
+    .allocstack 0A8h
+    .endprolog
+
+    lea         rsi, [rsp+0E8h]
+    lea         rdi, [rsp+020h]
+    mov         rcx, 15
+    rep         movsq
+
+    mov         r9,qword ptr [rsp+0E0h]
+    mov         r8,qword ptr [rsp+0D8h]
+    mov         rdx,qword ptr [rsp+0D0h]
+    mov         rcx,qword ptr [rsp+0C8h]
+    call        qword ptr [rsp+0C0h]
+
+    add         rsp,0A8h
+    pop         rdi
+    pop         rsi
+    ret
+
+Sbie_CallFunction_asm ENDP
+endif
+
+;----------------------------------------------------------------------------
+
+ifdef _WIN64
 
 EXTERN Token_SepFilterToken : QWORD
 
@@ -237,9 +276,9 @@ Sbie_SepFilterTokenHandler_asm PROC FRAME
     mov         qword ptr [rsp+20h],r9  
     mov         qword ptr [rsp+18h],r8  
     mov         qword ptr [rsp+10h],rdx  
-    mov         qword ptr [rsp+8],rcx  
+    mov         qword ptr [rsp+8],rcx
 
-    sub         rsp,78h  
+    sub         rsp,78h                  ; 8 * 15 - reserve stack space
     .allocstack 78h
     .endprolog
 
@@ -259,7 +298,7 @@ Sbie_SepFilterTokenHandler_asm PROC FRAME
     mov         r8d,0
     mov         edx,0
     mov         rcx,qword ptr [rsp+080h] ; TokenObject 
-    call        Token_SepFilterToken
+    call        Token_SepFilterToken     ; 11 arguments
 
     add         rsp,78h  
 

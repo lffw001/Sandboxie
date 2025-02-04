@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2023 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -74,10 +74,14 @@ const WCHAR *Dll_HomeDosPath = NULL;
 //ULONG Dll_HomeDosPathLen = 0;
 
 const WCHAR *Dll_BoxFilePath = NULL;
+const WCHAR *Dll_BoxFileRawPath = NULL;
+const WCHAR *Dll_BoxFileDosPath = NULL;
 const WCHAR *Dll_BoxKeyPath = NULL;
 const WCHAR *Dll_BoxIpcPath = NULL;
 
 ULONG Dll_BoxFilePathLen = 0;
+ULONG Dll_BoxFileRawPathLen = 0;
+ULONG Dll_BoxFileDosPathLen = 0;
 ULONG Dll_BoxKeyPathLen = 0;
 ULONG Dll_BoxIpcPathLen = 0;
 ULONG Dll_SidStringLen = 0;
@@ -85,15 +89,17 @@ ULONG Dll_SidStringLen = 0;
 ULONG Dll_ProcessId = 0;
 ULONG Dll_SessionId = 0;
 
+ULONG Dll_DriverFlags = 0;
 ULONG64 Dll_ProcessFlags = 0;
 
 #ifndef _WIN64
 BOOLEAN Dll_IsWow64 = FALSE;
 #endif
-#ifdef _M_X64
+#ifdef _M_ARM64EC
 BOOLEAN Dll_IsArm64ec = FALSE;
+void* Dll_xtajit64 = NULL;
 #endif
-#ifndef _M_ARM64
+#ifndef _WIN64
 BOOLEAN Dll_IsXtAjit = FALSE;
 #endif
 BOOLEAN Dll_IsSystemSid = FALSE;
@@ -113,7 +119,6 @@ ULONG Dll_Windows = 0;
 
 const UCHAR *SbieDll_Version = MY_VERSION_STRING;
 
-BOOLEAN Dll_SbieTrace = FALSE;
 
 //extern ULONG64 __security_cookie = 0;
 
@@ -310,6 +315,12 @@ _FX void Dll_InitInjected(void)
     //Dll_HomeDosPathLen = wcslen(Dll_HomeDosPath);
 
     //
+    // get features flags
+    //
+
+    SbieApi_QueryDrvInfo(0, &Dll_DriverFlags, sizeof(Dll_DriverFlags));
+
+    //
     // get process type and flags
     //
 
@@ -367,8 +378,8 @@ _FX void Dll_InitInjected(void)
   //
   //      //
   //      // instead of using a separate namespace
-  //		// just replace all \ with _ and use it as a sufix rather then an actual path
-  //      // similarly a its done for named pipes already
+  //		// just replace all \ with _ and use it as a suffix rather then an actual path
+  //      // similar to what is done for named pipes already
   //      // this approach can help to reduce the footprint when running in portable mode
   //      // alternatively we could create volatile entries under AppContainerNamedObjects 
   //      //
@@ -494,6 +505,9 @@ _FX void Dll_InitInjected(void)
         ok = Proc_Init();
 
     if (ok)
+        ok = Kernel_Init();
+
+    if (ok)
         ok = Gui_InitConsole1();
 
     if (ok) // Note: Ldr_Init may cause rpcss to be started early
@@ -511,6 +525,19 @@ _FX void Dll_InitInjected(void)
     if (! ok) {
         SbieApi_Log(2304, Dll_ImageName);
         ExitProcess(-1);
+    }
+
+    //
+    // Setup soft resource restrictions
+    //
+
+    WCHAR str[32];
+    if (NT_SUCCESS(SbieApi_QueryConfAsIs(NULL, L"CpuAffinityMask", 0, str, sizeof(str) - sizeof(WCHAR))) && str[0] == L'0' && (str[1] == L'x' || str[1] == L'X')){
+
+        WCHAR* endptr;
+        KAFFINITY AffinityMask = wcstoul(str + 2, &endptr, 16); // note we only support core 0-31 as wcstoull is not exported by ntdll
+        if (AffinityMask)
+            NtSetInformationProcess(GetCurrentProcess(), ProcessAffinityMask, &AffinityMask, sizeof(KAFFINITY));
     }
 
     Dll_InitComplete = TRUE;
@@ -531,13 +558,6 @@ _FX void Dll_InitExeEntry(void)
     // Dll_InitInjected is executed by Ldr_Inject_Entry after NTDLL has
     // finished initializing the process (loading static import DLLs, etc)
     //
-
-    //
-    // on Windows 8, we can't load advapi32.dll during Scm_SecHostDll
-    //
-    //
-
-    Scm_SecHostDll_W8();
 
     //
     // hook DefWindowProc on Windows 7, after USER32 has been initialized
@@ -598,9 +618,7 @@ _FX void Dll_InitExeEntry(void)
     // once we return here the process images entrypoint will be called
     //
 
-#ifdef WITH_DEBUG
-    DbgTrace("Dll_InitExeEntry completed");
-#endif
+    Trace_Entry();
     Dll_EntryComplete = TRUE;
 }
 
@@ -646,6 +664,8 @@ _FX ULONG Dll_GetImageType(const WCHAR *ImageName)
                 ImageType = DLL_IMAGE_OTHER_WEB_BROWSER;
             else if (_wcsicmp(L"mail", buf) == 0)
                 ImageType = DLL_IMAGE_OTHER_MAIL_CLIENT;
+            else if (_wcsicmp(L"plugin", buf) == 0)
+                ImageType = DLL_IMAGE_PLUGIN_CONTAINER;
             else
                 ImageType = DLL_IMAGE_LAST; // invalid type set place holder such that we keep this image uncustomized
 
@@ -716,9 +736,9 @@ _FX void Dll_SelectImageType(void)
 {
     Dll_ImageType = Dll_GetImageType(Dll_ImageName);
 
-    if (Dll_ImageType == DLL_IMAGE_UNSPECIFIED &&
-            _wcsnicmp(Dll_ImageName, L"FlashPlayerPlugin_", 18) == 0)
-        Dll_ImageType = DLL_IMAGE_FLASH_PLAYER_SANDBOX;
+    //if (Dll_ImageType == DLL_IMAGE_UNSPECIFIED &&
+    //        _wcsnicmp(Dll_ImageName, L"FlashPlayerPlugin_", 18) == 0)
+    //    Dll_ImageType = DLL_IMAGE_FLASH_PLAYER_SANDBOX;
 
     if (Dll_ImageType == DLL_IMAGE_DLLHOST) {
 
@@ -756,8 +776,8 @@ _FX void Dll_SelectImageType(void)
 
         if (Dll_ImageType == DLL_IMAGE_GOOGLE_CHROME ||
             Dll_ImageType == DLL_IMAGE_MOZILLA_FIREFOX ||
-            Dll_ImageType == DLL_IMAGE_ACROBAT_READER ||
-            Dll_ImageType == DLL_IMAGE_FLASH_PLAYER_SANDBOX) {
+            //Dll_ImageType == DLL_IMAGE_FLASH_PLAYER_SANDBOX
+            Dll_ImageType == DLL_IMAGE_ACROBAT_READER) {
 
             Dll_ChromeSandbox = TRUE;
         }
@@ -772,45 +792,19 @@ _FX void Dll_SelectImageType(void)
 //---------------------------------------------------------------------------
 
 
-_FX ULONG_PTR Dll_Ordinal1(
-    ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
-    ULONG_PTR arg4, ULONG_PTR arg5)
+_FX VOID Dll_Ordinal1(INJECT_DATA * inject)
 {
-    typedef ULONG_PTR (*P_RtlFindActivationContextSectionString)(
-                    ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
-                    ULONG_PTR arg4, ULONG_PTR arg5);
-    P_RtlFindActivationContextSectionString RtlFindActCtx;
-
-#if defined(_M_ARM64) || defined(_M_ARM64EC)
-    //
-    // on ARM64 we hook LdrLoadDll instead, using the prototype for 
-    // RtlFindActCtx is fine though as arguments 1-8 are passed in registers
-    // so if we set x4 or not does not matter in the least
-    //
-#endif
-
-    INJECT_DATA *inject;
-    SBIELOW_DATA *data;
-    ULONG dummy_prot;
+    SBIELOW_DATA *data = (SBIELOW_DATA *)inject->sbielow_data;
     BOOLEAN bHostInject = FALSE;
-        
-    extern HANDLE SbieApi_DeviceHandle;
-
-    //
-    // this code is invoked from our RtlFindActivationContextSectionString
-    // hook in core/low/entry.asm, with a parameter that points to the
-    // syscall/inject data area.  the first ULONG64 in this data area
-    // includes a pointer to the SbieLow data area
-    // 
-
-    inject = (struct _INJECT_DATA *)arg1;
-
-    data = (SBIELOW_DATA *)inject->sbielow_data;
 
     SbieApi_data = data;
 #ifdef _M_ARM64EC
+    // get the pointer to sys_call_list in the SYS_CALL_DATA struct
     SbieApi_SyscallPtr = (ULONG*)((ULONG64)data->syscall_data + sizeof(ULONG) + sizeof(ULONG) + (NATIVE_FUNCTION_SIZE * NATIVE_FUNCTION_COUNT));
 #endif
+
+    extern HANDLE SbieApi_DeviceHandle;
+    SbieApi_DeviceHandle = (HANDLE)data->api_device_handle;
 
     //
     // the SbieLow data area includes values that are useful to us
@@ -820,37 +814,15 @@ _FX ULONG_PTR Dll_Ordinal1(
     bHostInject = data->flags.bHostInject == 1;
 
 #ifndef _WIN64
-    Dll_IsWow64 = data->flags.is_wow64 == 1;
+    Dll_IsWow64 = data->flags.is_wow64 == 1; // x86 on x64 or arm64
 #endif
-#ifdef _M_X64
-    Dll_IsArm64ec = data->flags.is_arm64ec == 1;
+#ifdef _M_ARM64EC
+    Dll_IsArm64ec = data->flags.is_arm64ec == 1; // x64 on arm64
+	Dll_xtajit64 = GetModuleHandle(L"xtajit64.dll");
 #endif
-#ifndef _M_ARM64
-    Dll_IsXtAjit = data->flags.is_xtajit == 1;
+#ifndef _WIN64
+    Dll_IsXtAjit = data->flags.is_xtajit == 1; // x86 on arm64
 #endif
-
-    SbieApi_DeviceHandle = (HANDLE)data->api_device_handle;
-
-    //
-    // our RtlFindActivationContextSectionString hook already restored
-    // the original bytes, but we should still restore the page protection
-    //
-
-    VirtualProtect((void *)(ULONG_PTR)inject->RtlFindActCtx, 5,
-                   inject->RtlFindActCtx_Protect, &dummy_prot);
-
-    arg1 = (ULONG_PTR)inject->RtlFindActCtx_SavedArg1;
-
-    RtlFindActCtx = (P_RtlFindActivationContextSectionString)
-                                                    inject->RtlFindActCtx;
-
-    //
-    // make sbielow_data read only, as it contsins required
-    // nt dll function copies it must stay executive
-    //
-
-    VirtualProtect((void *)data, sizeof(SBIELOW_DATA),
-                   PAGE_EXECUTE_READ, &dummy_prot);
 
 
     if (!bHostInject)
@@ -883,7 +855,7 @@ _FX ULONG_PTR Dll_Ordinal1(
 
         int MustRestartProcess = 0;
         if (Dll_ProcessFlags & SBIE_FLAG_PROCESS_IN_PCA_JOB) {
-            if (!SbieApi_QueryConfBool(NULL, L"NoRestartOnPAC", FALSE))
+            if (!SbieApi_QueryConfBool(NULL, L"NoRestartOnPCA", FALSE))
                 MustRestartProcess = 1;
         }
 
@@ -905,7 +877,7 @@ _FX ULONG_PTR Dll_Ordinal1(
         }
 
         //
-        // explorer needs sandboxed COM show warning and terminate when COM is not sandboxies
+        // explorer needs sandboxed COM to show a warning and terminate when COM is not sandboxed
         //
 
         if (Dll_ImageType == DLL_IMAGE_SHELL_EXPLORER && SbieDll_IsOpenCOM()) {
@@ -918,35 +890,22 @@ _FX ULONG_PTR Dll_Ordinal1(
         // msi installer requires COM to be sandboxed, else the installation will be done outside the sandbox
         //
 
-        if (Dll_ImageType == DLL_IMAGE_MSI_INSTALLER && SbieDll_IsOpenCOM()) {
+        if (Dll_ImageType == DLL_IMAGE_MSI_INSTALLER) {
 
-            SbieApi_Log(2196, NULL);
-            ExitProcess(0);
+            if (SbieDll_IsOpenCOM()) {
+                SbieApi_Log(2196, NULL);
+                ExitProcess(0);
+            }
+
+            if (!SbieApi_QueryConfBool(NULL, L"MsiInstallerExemptions", FALSE) && SbieApi_QueryConfBool(NULL, L"NotifyMsiInstaller", TRUE)) {
+                SbieApi_Log(2194, L"MsiInstallerExemptions=y");
+            }
         }
     }
     else
     {
         Ldr_Inject_Init(TRUE);
     }
-	
-    //
-    // free the syscall/inject data area which is no longer needed
-    //
-
-#ifdef _M_ARM64EC
-    SbieApi_SyscallPtr = NULL;
-#endif
-    VirtualFree(inject, 0, MEM_RELEASE);
-
-    
-    //
-    // conclude the detour by passing control back to the original
-    // RtlFindActivationContextSectionString.  the detour code used
-    // jump rather than call to invoke this function (see entry.asm)
-    // so RtlFindActivationContextSectionString returns to its caller
-    //
-
-    return RtlFindActCtx(arg1, arg2, arg3, arg4, arg5);
 }
 
 

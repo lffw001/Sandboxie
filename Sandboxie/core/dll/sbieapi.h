@@ -88,7 +88,7 @@ SBIEAPI_EXPORT LONG SbieApi_LogMsgEx(
 	ULONG session_id, ULONG msgid, const WCHAR* msg_data, USHORT msg_len);
 
 SBIEAPI_EXPORT LONG SbieApi_LogMsgExt(
-	ULONG msgid, const WCHAR** strings);
+	ULONG session_id, ULONG msgid, const WCHAR** strings);
 
 SBIEAPI_EXPORT
 LONG SbieApi_GetHomePath(
@@ -139,6 +139,13 @@ ULONG64 SbieApi_QueryProcessInfoEx(
     ULONG64 ext_data);
 
 SBIEAPI_EXPORT
+LONG SbieApi_QueryProcessInfoStr(
+    HANDLE ProcessId,
+    ULONG info_type,
+    WCHAR *out_str,
+    ULONG *inout_str_len);
+
+SBIEAPI_EXPORT
 LONG SbieApi_QueryBoxPath(
     const WCHAR *box_name,              // WCHAR [34]
     WCHAR *out_file_path,
@@ -183,7 +190,7 @@ LONG SbieApi_EnumProcessEx(
 
 SBIEAPI_EXPORT
 LONG SbieApi_SessionLeader(
-    HANDLE TokenHandle,
+    ULONG session_id,
     HANDLE *ProcessId);
 
 SBIEAPI_EXPORT
@@ -256,8 +263,9 @@ LONG SbieApi_RenameFile(
 SBIEAPI_EXPORT
 LONG SbieApi_GetFileName(
     HANDLE FileHandle,
-    ULONG NameLen,
-    WCHAR *NameBuf);
+    WCHAR *NameBuf,
+    ULONG *NameLen,
+    ULONG *ObjType);
 
 //SBIEAPI_EXPORT
 LONG SbieApi_OpenFile(
@@ -324,6 +332,14 @@ LONG SbieApi_QuerySymbolicLink(
 
 //---------------------------------------------------------------------------
 
+SBIEAPI_EXPORT
+LONG SbieApi_QueryDrvInfo(
+    ULONG info_class,
+    VOID* info_data,
+    ULONG info_size);
+
+//---------------------------------------------------------------------------
+
 
 SBIEAPI_EXPORT
 LONG SbieApi_ReloadConf(ULONG session_id, ULONG flags);
@@ -351,6 +367,12 @@ ULONG SbieApi_QueryConfNumber(
     const WCHAR *section_name,      // WCHAR [66]
     const WCHAR *setting_name,      // WCHAR [66]
     ULONG def);
+
+SBIEAPI_EXPORT
+ULONG64 SbieApi_QueryConfNumber64(
+    const WCHAR *section_name,      // WCHAR [66]
+    const WCHAR *setting_name,      // WCHAR [66]
+    ULONG64 def);
 
 SBIEAPI_EXPORT
 LONG SbieApi_EnumBoxes(

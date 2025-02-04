@@ -46,6 +46,9 @@
 #define MSGID_PROCESS_SET_DEVICE_MAP            0x1206
 #define MSGID_PROCESS_OPEN_DEVICE_MAP           0x1207
 #define MSGID_PROCESS_RUN_UPDATER               0x1208
+#define MSGID_PROCESS_GET_INFO                  0x1209
+#define MSGID_PROCESS_SUSPEND_RESUME_ONE        0x120A
+#define MSGID_PROCESS_SUSPEND_RESUME_ALL        0x120B
 
 #define MSGID_SERVICE                           0x1300
 #define MSGID_SERVICE_START                     0x1301
@@ -97,6 +100,9 @@
 #define MSGID_SBIE_INI_GET_VERSION              0x18AA
 #define MSGID_SBIE_INI_GET_WAIT_HANDLE          0x18AB
 #define MSGID_SBIE_INI_RUN_SBIE_CTRL            0x180A
+#define MSGID_SBIE_INI_RC4_CRYPT                0x180F
+
+//#define MSGID_SBIE_MGR                          0x1900
 
 #define MSGID_NETAPI                            0x1A00
 #define MSGID_NETAPI_USE_ADD                    0x1A01
@@ -123,12 +129,21 @@
 #define MSGID_IPHLP_SEND_ECHO                   0x1C03
 #define MSGID_IPHLP_NOTIFICATION                0x1CFF
 
+#define MSGID_IMBOX                             0x1D00
+#define MSGID_IMBOX_CREATE                      0x1D01
+#define MSGID_IMBOX_MOUNT                       0x1D02
+#define MSGID_IMBOX_UNMOUNT                     0x1D03
+#define MSGID_IMBOX_ENUM                        0x1D04
+#define MSGID_IMBOX_QUERY                       0x1D05
+#define MSGID_IMBOX_UPDATE                      0x1D06
+
 #define MSGID_QUEUE                             0x1E00
 #define MSGID_QUEUE_CREATE                      0x1E01
 #define MSGID_QUEUE_GETREQ                      0x1E02
 #define MSGID_QUEUE_PUTRPL                      0x1E03
 #define MSGID_QUEUE_PUTREQ                      0x1E04
 #define MSGID_QUEUE_GETRPL                      0x1E05
+#define MSGID_QUEUE_STARTUP                     0x1E10
 #define MSGID_QUEUE_NOTIFICATION                0x1EFF
 
 #define MSGID_EPMAPPER                          0x1F00

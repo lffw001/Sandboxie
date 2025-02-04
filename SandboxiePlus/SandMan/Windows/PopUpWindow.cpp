@@ -2,7 +2,6 @@
 #include "PopUpWindow.h"
 #include <windows.h>
 #include <QWindow>
-#include "SandMan.h"
 #include "../MiscHelpers/Common/Common.h"
 #include "../MiscHelpers/Common/Settings.h"
 #include "../SbiePlusAPI.h"
@@ -105,7 +104,7 @@ void CPopUpWindow::Show()
 		this->move(scrRect.width() - 600 - 20, scrRect.height() - 200 - 50);
 	}
 
-	SafeShow(this);
+	CSandMan::SafeShow(this);
 }
 
 void CPopUpWindow::Poke()
@@ -138,15 +137,54 @@ void CPopUpWindow::timerEvent(QTimerEvent* pEvent)
 	if (pEvent->timerId() != m_uTimerID)
 		return;
 
-	if (m_iTopMost > -5 && (--m_iTopMost == 0)) {
+	if (m_iTopMost > 0)
+	{
+		QWidget *topMostWindow = nullptr;
+		for (QWidget *widget : QApplication::topLevelWidgets()) {
+			if (widget->isVisible() && widget->isActiveWindow()) {
+				topMostWindow = widget;
+				break;
+			}
+		}
+
+		if(topMostWindow && (topMostWindow->inherits("CCheckableMessageBox") || topMostWindow->inherits("QMessageBox")))
+		{
+			m_iTopMost = 0;
+			SetWindowPos((HWND)this->winId(), HWND_NOTOPMOST , 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+			SetWindowPos((HWND)topMostWindow->winId(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+			SetWindowPos((HWND)topMostWindow->winId(), HWND_NOTOPMOST , 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
+	}
+
+	if (m_iTopMost > -5 && (--m_iTopMost == 0)) 
+	{
 		SetWindowPos((HWND)this->winId(), HWND_NOTOPMOST , 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	}
 }
 
-void CPopUpWindow::AddLogMessage(const QString& Message, quint32 MsgCode, const QStringList& MsgData, quint32 ProcessId)
+void CPopUpWindow::AddLogMessage(quint32 MsgCode, const QStringList& MsgData, quint32 ProcessId)
 {
 	if (IsMessageHidden(MsgCode, MsgData))
 		return;
+
+	CBoxedProcessPtr pProcess;
+	QString ProcessName;
+	QString BoxName;
+	if (ProcessId == 4)
+		ProcessName = "System";
+	else {
+		pProcess = theAPI->GetProcessById(ProcessId);
+		if (!pProcess.isNull()) {
+			ProcessName = pProcess->GetProcessName();
+			BoxName = pProcess->GetBoxName();
+		}
+		else
+			ProcessName = QString("PID %1").arg(ProcessId);
+	}
+
+	QString Message = theGUI->FormatSbieMessage(MsgCode, MsgData, ProcessName);
+	QString Link = theGUI->MakeSbieMsgLink(MsgCode, MsgData, ProcessName);
 
 	int RowCounter = ui.table->rowCount();
 	if (RowCounter > 0) {
@@ -157,14 +195,13 @@ void CPopUpWindow::AddLogMessage(const QString& Message, quint32 MsgCode, const 
 		}
 	}
 
-	CPopUpMessage* pEntry = new CPopUpMessage(Message, MsgCode, MsgData, this);
+	CPopUpMessage* pEntry = new CPopUpMessage(Message, Link, MsgCode, MsgData, ProcessName, BoxName, this);
 	QObject::connect(pEntry, SIGNAL(Dismiss()), this, SLOT(OnDismissMessage()));
 	QObject::connect(pEntry, SIGNAL(Hide()), this, SLOT(OnHideMessage()));
 	AddEntry(pEntry);
 
 	if ((MsgCode & 0xFFFF) == 1319) // Blocked spooler print to file
 	{
-		CBoxedProcessPtr pProcess = theAPI->GetProcessById(ProcessId);
 		if (pProcess.isNull() || pProcess->IsTerminated())
 			return;
 
@@ -211,7 +248,7 @@ void CPopUpWindow::ReloadHiddenMessages()
 
 void CPopUpWindow::OnDismissMessage()
 {
-	CPopUpMessage* pEntry = qobject_cast<CPopUpMessage*>(sender());
+	CPopUpEntry* pEntry = qobject_cast<CPopUpEntry*>(sender());
 	RemoveEntry(pEntry);
 }
 
@@ -268,7 +305,7 @@ void CPopUpWindow::AddUserPrompt(quint32 RequestId, const QVariantMap& Data, qui
 	if (retval != -1)
 	{
 		Result["retval"] = retval;
-		theAPI->SendReplyData(RequestId, Result);
+		theAPI->SendQueueRpl(RequestId, Result);
 		return;
 	}
 
@@ -331,7 +368,7 @@ void CPopUpWindow::SendPromptResult(CPopUpPrompt* pEntry, int retval)
 		return;
 
 	pEntry->m_Result["retval"] = retval;
-	theAPI->SendReplyData(pEntry->m_RequestId, pEntry->m_Result);
+	theAPI->SendQueueRpl(pEntry->m_RequestId, pEntry->m_Result);
 
 	if (pEntry->m_pRemember->isChecked())
 		pEntry->m_pProcess.objectCast<CSbieProcess>()->SetRememberedAction(pEntry->m_Result["id"].toInt(), retval);
@@ -348,7 +385,7 @@ void CPopUpWindow::AddFileToRecover(const QString& FilePath, QString BoxPath, co
 	if (BoxPath.isEmpty()) // legacy case, no BoxName, no support for driver serial numbers
 		BoxPath = theAPI->GetBoxedPath(pBox->GetName(), FilePath);
 
-	CPopUpRecovery* pEntry = new CPopUpRecovery(Message, FilePath, BoxPath, pBox->GetName(), this);
+	CPopUpRecovery* pEntry = new CPopUpRecovery(Message, FilePath, theAPI->GetBoxedPath(pBox.data(), FilePath), pBox->GetName(), this);
 
 	QStringList RecoverTargets = theAPI->GetUserSettings()->GetTextList("SbieCtrl_RecoverTarget", true);
 	pEntry->m_pTarget->insertItems(pEntry->m_pTarget->count()-1, RecoverTargets);

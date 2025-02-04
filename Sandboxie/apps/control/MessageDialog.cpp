@@ -290,6 +290,10 @@ void CMessageDialog::OnTimer()
 		if (code == MSG_1399)
 			continue;
 
+		//
+		// ignore process forced notification
+		if (code == MSG_1321)
+			continue;
 
 
         WCHAR *str1 = m_buf;
@@ -644,9 +648,13 @@ void CMessageDialog::DiscardMessages(
 
 void CMessageDialog::OnHelp()
 {
-    CString sbie = GetSBIExxxx(NULL, NULL);
-    if (! sbie.IsEmpty())
-        CRunBrowser::OpenHelp(this, sbie);
+    CString Detail;
+    CString sbie = GetSBIExxxx(NULL, &Detail);
+    if (!sbie.IsEmpty()) {
+        CString url = L"https://sandboxie-plus.com/go.php?to=sbie-" + sbie + "&detail=" + CRunBrowser::EscapeForURL(Detail);
+        CRunBrowser x(this, url);
+        //CRunBrowser::OpenHelp(this, sbie);
+    }
 }
 
 

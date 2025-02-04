@@ -190,6 +190,60 @@ typedef CONST OBJECT_ATTRIBUTES *PCOBJECT_ATTRIBUTES;
     (p)->SecurityQualityOfService = NULL;               \
     }
 
+NTSYSAPI BOOLEAN WINAPI RtlValidSecurityDescriptor(
+  PSECURITY_DESCRIPTOR SecurityDescriptor
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlGetControlSecurityDescriptor(
+  PSECURITY_DESCRIPTOR pSecurityDescriptor,
+  PSECURITY_DESCRIPTOR_CONTROL pControl,
+  LPDWORD lpdwRevision
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlMakeSelfRelativeSD(
+  PSECURITY_DESCRIPTOR pAbsoluteSecurityDescriptor,
+  PSECURITY_DESCRIPTOR pSelfRelativeSecurityDescriptor,
+  LPDWORD lpdwBufferLength
+);
+
+NTSYSAPI ULONG WINAPI RtlLengthSecurityDescriptor(
+  PSECURITY_DESCRIPTOR SecurityDescriptor
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlAbsoluteToSelfRelativeSD(
+  PSECURITY_DESCRIPTOR AbsoluteSecurityDescriptor,
+  PSECURITY_DESCRIPTOR SelfRelativeSecurityDescriptor,
+  PULONG               BufferLength
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlSelfRelativeToAbsoluteSD(
+  PSECURITY_DESCRIPTOR SelfRelativeSecurityDescriptor,
+  PSECURITY_DESCRIPTOR AbsoluteSecurityDescriptor,
+  PULONG               AbsoluteSecurityDescriptorSize,
+  PACL                 Dacl,
+  PULONG               DaclSize,
+  PACL                 Sacl,
+  PULONG               SaclSize,
+  PSID                 Owner,
+  PULONG               OwnerSize,
+  PSID                 PrimaryGroup,
+  PULONG               PrimaryGroupSize
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlGetAce(
+  PACL  Acl,
+  ULONG AceIndex,
+  PVOID *Ace
+);
+
+NTSYSAPI NTSTATUS WINAPI RtlAddAce(
+  PACL  Acl,
+  ULONG AceRevision,
+  ULONG StartingAceIndex,
+  PVOID AceList,
+  ULONG AceListLength
+);
+
 //---------------------------------------------------------------------------
 
 #define PAGE_SIZE 4096
@@ -227,8 +281,6 @@ typedef struct __PUBLIC_OBJECT_TYPE_INFORMATION {
     UNICODE_STRING TypeName;
 
     ULONG Reserved [22];    // reserved for internal use
-
-    BYTE  ExtraPadding[48]; // NtQueryObject often requires more space than MSDN says
 
 } PUBLIC_OBJECT_TYPE_INFORMATION, *PPUBLIC_OBJECT_TYPE_INFORMATION;
 
@@ -460,8 +512,8 @@ typedef enum _FILE_INFORMATION_CLASS {
     FileNumaNodeInformation,                 // 53
     FileStandardLinkInformation,             // 54
     FileRemoteProtocolInformation,           // 55
-    FileRenameInformationBypassAccessCheck,  // 56
-    FileLinkInformationBypassAccessCheck,    // 57
+    FileRenameInformationBypassAccessCheck,  // 56 - kernel mode only
+    FileLinkInformationBypassAccessCheck,    // 57 - kernel mode only
     FileVolumeNameInformation,               // 58
     FileIdInformation,                       // 59
     FileIdExtdDirectoryInformation,          // 60
@@ -469,8 +521,18 @@ typedef enum _FILE_INFORMATION_CLASS {
     FileHardLinkFullIdInformation,
     FileIdExtdBothDirectoryInformation,
     FileDispositionInformationEx,
-    FileRenameInformationEx,                 // 65
-    FileRenameInformationExBypassAccessCheck,
+    FileRenameInformationEx,                        // 65
+    FileRenameInformationExBypassAccessCheck,       // 66 - kernel mode only
+    FileDesiredStorageClassInformation,             // 67
+    FileStatInformation,                            // 68
+    FileMemoryPartitionInformation,                 // 69
+    FileStatLxInformation,                          // 70
+    FileCaseSensitiveInformation,                   // 71
+    FileLinkInformationEx,                          // 72
+    FileLinkInformationExBypassAccessCheck,         // 73 - kernel mode only
+    FileStorageReserveIdInformation,                // 74
+    FileCaseSensitiveInformationForceAccessCheck,   // 75
+
     FileMaximumInformation
 } FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
 
@@ -586,6 +648,11 @@ typedef struct _FILE_POSITION_INFORMATION {
     LARGE_INTEGER CurrentByteOffset;
 } FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
 
+// FileEndOfFileInformation
+typedef struct _FILE_END_OF_FILE_INFORMATION {
+  LARGE_INTEGER EndOfFile;
+} FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
+
 // FileStreamInformation
 typedef struct _FILE_STREAM_INFORMATION {
     ULONG NextEntryOffset;
@@ -695,6 +762,21 @@ typedef struct _FILE_ALL_INFORMATION {
     FILE_NAME_INFORMATION NameInformation;
 } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
 
+// FileLinkInformation
+typedef struct _FILE_LINK_INFORMATION {
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN10_RS5)
+    union {
+        BOOLEAN ReplaceIfExists;  // FileLinkInformation
+        ULONG Flags;              // FileLinkInformationEx
+    } DUMMYUNIONNAME;
+#else
+    BOOLEAN ReplaceIfExists;
+#endif
+    HANDLE RootDirectory;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} FILE_LINK_INFORMATION, *PFILE_LINK_INFORMATION;
+
 __declspec(dllimport) NTSTATUS __stdcall
 NtCreateFile(
     OUT PHANDLE                     FileHandle,
@@ -743,6 +825,15 @@ NtQueryInformationFile(
     IN ULONG                        Length,
     IN FILE_INFORMATION_CLASS       FileInformationClass
 );
+
+/*__declspec(dllimport) NTSTATUS __stdcall
+NtQueryInformationByName(
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(Length) PVOID FileInformation,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass
+);*/
 
 __declspec(dllimport) NTSTATUS __stdcall
 NtQueryAttributesFile(
@@ -2303,6 +2394,7 @@ __declspec(dllimport) NTSTATUS RtlGetGroupSecurityDescriptor(
 );
 
 __declspec(dllimport) BOOLEAN NTAPI RtlEqualSid(PSID Sid1, PSID Sid2);
+__declspec(dllimport) ULONG NTAPI RtlLengthSid(PSID Sid);
 __declspec(dllimport) PVOID NTAPI RtlFreeSid(PSID Sid);
 
 //---------------------------------------------------------------------------

@@ -12,7 +12,6 @@ HEADERS += ./MiscHelpers.h \
     ./Common/FlexError.h \
     ./Common/FlowLayout.h \
     ./Common/HistoryGraph.h \
-    ./Common/qRC4.h \
     ./Common/Xml.h \
     ./Common/CheckableMessageBox.h \
     ./Common/ComboInputDialog.h \
@@ -36,6 +35,9 @@ HEADERS += ./MiscHelpers.h \
     ./Common/NeonEffect.h \
     ./Common/NetworkAccessManager.h \
     ./Common/MT/ThreadLock.h \
+    ./Common/MultiErrorDialog.h \
+    ./Common/CheckableComboBox.h \
+    ./Common/CodeEdit.h \
     ./Archive/Archive.h \
     ./Archive/ArchiveFS.h \
     ./Archive/ArchiveExtractor.h \
@@ -62,7 +64,6 @@ SOURCES += ./MiscHelpers.cpp \
     ./Common/ListItemModel.cpp \
     ./Common/MultiLineInputDialog.cpp \
     ./Common/PanelView.cpp \
-    ./Common/qRC4.cpp \
     ./Common/NetworkAccessManager.cpp \
     ./Common/Settings.cpp \
     ./Common/SettingsWidgets.cpp \
@@ -72,6 +73,9 @@ SOURCES += ./MiscHelpers.cpp \
     ./Common/TreeItemModel.cpp \
     ./Common/Xml.cpp \
     ./Common/MT/ThreadLock.cpp \
+    ./Common/MultiErrorDialog.cpp \
+    ./Common/CheckableComboBox.cpp \
+    ./Common/CodeEdit.cpp \
     ./Archive/Archive.cpp \
     ./Archive/ArchiveFS.cpp \
     ./Archive/ArchiveExtractor.cpp \
