@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2021-2023 David Xanatos, xanasoft.com
+ * Copyright 2021-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -141,7 +141,7 @@ typedef NTSTATUS(*P_LdrQueryImageFileExecutionOptions)(
 typedef ULONG_PTR(*P_NtApphelpCacheControl)(
     ULONG_PTR Unknown1, ULONG_PTR Unknown2);
 
-typedef NTSTATUS(*P_NtTerminateProcess)(HANDLE ProcessHandle, NTSTATUS ExitStatus);
+//typedef NTSTATUS(*P_NtTerminateProcess)(HANDLE ProcessHandle, NTSTATUS ExitStatus);
 
 typedef NTSTATUS(*P_NtLoadDriver)(UNICODE_STRING *RegistryPath);
 
@@ -155,7 +155,7 @@ typedef void(*P_Ldr_CallOneDllCallback)(const UCHAR *ImageNameA, ULONG_PTR Image
 static P_LdrRegisterDllNotification __sys_LdrRegisterDllNotification = NULL;
 static P_LdrUnregisterDllNotification __sys_LdrUnregisterDllNotification = NULL;
 
-static P_NtTerminateProcess     __sys_NtTerminateProcess = NULL;
+//static P_NtTerminateProcess     __sys_NtTerminateProcess = NULL;
 
 static P_LdrLockLoaderLock      __sys_LdrLockLoaderLock = NULL;
 static P_LdrUnlockLoaderLock    __sys_LdrUnlockLoaderLock = NULL;
@@ -184,7 +184,7 @@ static DLL Ldr_Dlls[] = {
     { L"ole32.dll",             Ole_Init,                       0}, // COM, OLE
     { L"combase.dll",           Com_Init_ComBase,               0}, // COM
     { L"rpcrt4.dll",            RpcRt_Init,                     0}, // RPC, epmapper
-    { L"sechost.dll",           Scm_SecHostDll,                 0}, // SCM
+    { L"sechost.dll",           SecHost_Init,                   0}, // SCM
     { L"shell32.dll",           SH32_Init,                      0},
     { L"shcore.dll",            Taskbar_SHCore_Init,            0}, // win 8, [Get/Set]CurrentProcessExplicitAppUserModelID
     { L"wtsapi32.dll",          Terminal_Init_WtsApi,           0},
@@ -218,6 +218,8 @@ static DLL Ldr_Dlls[] = {
     { L"uxtheme.dll",           SH32_Init_UxTheme,              0}, // explorer.exe, SetWindowThemeAttribute
     { L"hnetcfg.dll",           HNet_Init,                      0}, // firewall workaround
     { L"winnsi.dll",            NsiRpc_Init,                    0}, // WININET workaround
+//    { L"wininet.dll",           Wininet_Init,                   0},
+    { L"nsi.dll",               Nsi_Init,                       0},
     { L"advpack.dll",           Proc_Init_AdvPack,              0}, // fix for IE
     { L"dwrite.dll",            Scm_DWriteDll,                  0}, // hack for IE 9, make sure FontCache is running
     { L"ComDlg32.dll",          ComDlg32_Init,                  0}, // fix for opera.exe
@@ -258,23 +260,23 @@ static BOOLEAN Ldr_DynamicImageDetection = FALSE;
 #include "ldr_init.c"
 
 
-NTSTATUS Ldr_NtTerminateProcess(HANDLE  ProcessHandle, NTSTATUS ExitStatus)
-{
-    NTSTATUS rc;
-
-    // ProcessHandle is optional. Unregister callback when current process is terminating
-    if (!ProcessHandle
-        || ProcessHandle == NtCurrentProcess()
-        || GetCurrentProcessId() == GetProcessId(ProcessHandle)
-        )
-    {
-        __sys_LdrUnregisterDllNotification(LdrLoaderCookie);
-    }
-
-    rc = __sys_NtTerminateProcess(ProcessHandle, ExitStatus);
-
-    return rc;
-}
+//NTSTATUS Ldr_NtTerminateProcess(HANDLE  ProcessHandle, NTSTATUS ExitStatus)
+//{
+//    NTSTATUS rc;
+//
+//    // ProcessHandle is optional. Unregister callback when current process is terminating
+//    if (!ProcessHandle
+//        || ProcessHandle == NtCurrentProcess()
+//        || GetCurrentProcessId() == GetProcessId(ProcessHandle)
+//        )
+//    {
+//        __sys_LdrUnregisterDllNotification(LdrLoaderCookie);
+//    }
+//
+//    rc = __sys_NtTerminateProcess(ProcessHandle, ExitStatus);
+//
+//    return rc;
+//}
 
 //---------------------------------------------------------------------------
 
@@ -282,22 +284,15 @@ void CALLBACK Ldr_LdrDllNotification(ULONG NotificationReason, PLDR_DLL_NOTIFICA
 {
     ULONG_PTR LdrCookie = 0;
     NTSTATUS status = 0;
-    WCHAR text[4096];
 
     if (NotificationReason == 1) {
         status = __sys_LdrLockLoaderLock(0, NULL, &LdrCookie);
         Ldr_MyDllCallbackNew(NotificationData->Loaded.BaseDllName->Buffer, (HMODULE)NotificationData->Loaded.DllBase, TRUE);
         __sys_LdrUnlockLoaderLock(0, LdrCookie);
-
-        Sbie_snwprintf(text, ARRAYSIZE(text), L"%s (loaded)", NotificationData->Loaded.BaseDllName->Buffer);
     }
     else if (NotificationReason == 2) {
         Ldr_MyDllCallbackNew(NotificationData->Unloaded.BaseDllName->Buffer,  (HMODULE)NotificationData->Loaded.DllBase, FALSE);
-
-        Sbie_snwprintf(text, ARRAYSIZE(text), L"%s (unloaded)", NotificationData->Loaded.BaseDllName->Buffer);
     }
-
-    SbieApi_MonitorPutMsg(MONITOR_IMAGE, text);
 }
 
 //---------------------------------------------------------------------------
@@ -438,7 +433,9 @@ _FX BOOLEAN Ldr_Init()
     if (Dll_OsBuild >= 9600) { // Windows 8.1 and later
         NTSTATUS rc = 0;
 
-        void *NtTerminateProcess = (P_NtTerminateProcess)GetProcAddress(Dll_Ntdll, "NtTerminateProcess");
+        //void *NtTerminateProcess = (P_NtTerminateProcess)GetProcAddress(Dll_Ntdll, "NtTerminateProcess");
+
+        // this functions are available since windows vista
         __sys_LdrRegisterDllNotification = (P_LdrRegisterDllNotification)GetProcAddress(Dll_Ntdll, "LdrRegisterDllNotification");
         __sys_LdrUnregisterDllNotification = (P_LdrUnregisterDllNotification)GetProcAddress(Dll_Ntdll, "LdrUnregisterDllNotification");
 
@@ -454,7 +451,8 @@ _FX BOOLEAN Ldr_Init()
             return FALSE;
         }
 
-        SBIEDLL_HOOK(Ldr_, NtTerminateProcess);
+        // Todo: Fix-Me: this hangs some processes on arm64
+        //SBIEDLL_HOOK(Ldr_, NtTerminateProcess);
         SBIEDLL_HOOK(Ldr_Win10_, LdrLoadDll);
     }
     else { // Windows 8 and before
@@ -702,7 +700,7 @@ _FX void Ldr_CallDllCallbacks(void)
             if (!found) {
 
                 __my_Ldr_CallOneDllCallback(pOld->Path + pOld->NameOffset,
-                    pNew->ImageBaseAddress, FALSE);
+                    pOld->ImageBaseAddress, FALSE);
             }
         }
     }
@@ -858,7 +856,6 @@ _FX NTSTATUS Ldr_LdrLoadDll(
         }
         __sys_LdrUnlockLoaderLock(0, LdrCookie);
     }
-    Scm_SecHostDll_W8();
     return status;
 }
 
@@ -877,11 +874,8 @@ _FX NTSTATUS Ldr_Win10_LdrLoadDll(
     //
     // load the DLL 
     //
-    NTSTATUS status = 0;
 
-    status = Ldr_LdrLoadDllImpl(PathString, DllFlags, ModuleName, ModuleHandle);
-    Scm_SecHostDll_W8();
-    return status;
+    return Ldr_LdrLoadDllImpl(PathString, DllFlags, ModuleName, ModuleHandle);
 }
 
 //---------------------------------------------------------------------------
@@ -955,8 +949,6 @@ _FX ULONG_PTR Ldr_LdrResolveDelayLoadedAPI(
         UnknownParameter2, UnknownParameter3, UnknownParameter4);
 
     Ldr_CallDllCallbacks_WithLock();
-
-    Scm_SecHostDll_W8();
 
     return result;
 }
@@ -1090,38 +1082,25 @@ _FX void Ldr_MyDllCallbackA(const CHAR *ImageName, HMODULE ImageBase, BOOL LoadS
     WCHAR ImageNameW[128];
     Sbie_snwprintf(ImageNameW, ARRAYSIZE(ImageNameW), L"%S", ImageName);
 
-    Ldr_MyDllCallbackW(ImageNameW, ImageBase, LoadState);
+    Ldr_MyDllCallbackNew(ImageNameW, ImageBase, LoadState);
 }
+
 
 _FX void Ldr_MyDllCallbackW(const WCHAR *ImageName, HMODULE ImageBase, BOOL LoadState) // Windows XP
 {
-    //
-    // invoke our sub-modules as necessary
-    //
-
-    DLL *dll = Ldr_Dlls;
-    while (dll->nameW) {
-        if (_wcsicmp(ImageName, dll->nameW) == 0 && (dll->state & 2) == 0) {
-            if (LoadState) {
-                BOOLEAN ok = dll->init_func(ImageBase);
-                if (!ok)
-                    SbieApi_Log(2318, dll->nameW);
-            } else {
-                SbieDll_UnHookModule(ImageBase);
-            }
-            break;
-        }
-
-        ++dll;
-    }
-
-    if (LoadState)
-        Ldr_DetectImageType(ImageName);
+    Ldr_MyDllCallbackNew(ImageName, ImageBase, LoadState);
 }
 
 
 _FX void Ldr_MyDllCallbackNew(const WCHAR *ImageName, HMODULE ImageBase, BOOL LoadState) // Windows 8.1 and later
 {
+    WCHAR text[4096];
+    if(LoadState)
+        Sbie_snwprintf(text, ARRAYSIZE(text), L"%s (loaded)", ImageName);
+    else
+        Sbie_snwprintf(text, ARRAYSIZE(text), L"%s (unloaded)", ImageName);
+    SbieApi_MonitorPutMsg(MONITOR_IMAGE, text);
+
     //
     // invoke our sub-modules as necessary
     //
@@ -1142,7 +1121,7 @@ _FX void Ldr_MyDllCallbackNew(const WCHAR *ImageName, HMODULE ImageBase, BOOL Lo
             }
             else {
                 if (dll->state) {
-                    SbieDll_UnHookModule(ImageBase);
+                    //SbieDll_UnHookModule(ImageBase);
                     EnterCriticalSection(&Ldr_LoadedModules_CritSec);
                     dll->state = 0;
                     LeaveCriticalSection(&Ldr_LoadedModules_CritSec);
@@ -1154,8 +1133,14 @@ _FX void Ldr_MyDllCallbackNew(const WCHAR *ImageName, HMODULE ImageBase, BOOL Lo
     }
 
     if (LoadState)
+        SbieDll_TraceModule(ImageBase);
+    else
+        SbieDll_UnHookModule(ImageBase);
+
+    if (LoadState)
         Ldr_DetectImageType(ImageName);
 }
+
 
 //---------------------------------------------------------------------------
 // Ldr_GetProcAddr
@@ -1205,12 +1190,12 @@ _FX void *Ldr_GetProcAddrOld(const WCHAR *DllName, const WCHAR *ProcNameW)
 _FX void *Ldr_GetProcAddrNew(const WCHAR *DllName, const WCHAR *ProcNameW, char * ProcNameA)
 {
     NTSTATUS status;
-    void *proc;
+    void *proc = NULL;
     //  char buffer[768];
     //  sprintf(buffer,"GetProcAddrNew: DllName = %S, ProcW = %S, ProcA = %s\n",DllName,ProcNameW,ProcNameA);
     //  OutputDebugStringA(buffer);
 
-    if (Dll_OsBuild < 9600) {
+    if (Dll_OsBuild < 9600) { // Windows 8.0 or earlier
         proc = Ldr_GetProcAddr_2(DllName, ProcNameW);
         if (!proc) {
             ULONG_PTR LdrCookie;
@@ -1241,7 +1226,7 @@ _FX void *Ldr_GetProcAddrNew(const WCHAR *DllName, const WCHAR *ProcNameW, char 
             }
         }
     }
-    else {
+    else { // Windows 8.1 and later
         HMODULE DllBase;
         DllBase = GetModuleHandle(DllName);
         if (!DllBase) {

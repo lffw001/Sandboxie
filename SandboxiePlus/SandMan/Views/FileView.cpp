@@ -6,6 +6,7 @@
 #include "../MiscHelpers/Common/TreeItemModel.h"
 #include "../MiscHelpers/Common/OtherFunctions.h"
 #include "../QSbieAPI/SbieUtils.h"
+#include "../Windows/SettingsWindow.h"
 
 CFileView::CFileView(QWidget *parent)
 	: QWidget(parent)
@@ -102,6 +103,7 @@ void CFileView::OnAboutToBeModified()
 #include <Shlobj.h>
 #include <atlbase.h>
 
+#define MENU_SANDBOX            -1
 #define MENU_RECOVER            1
 #define MENU_RECOVER_TO_ANY     2
 #define MENU_CREATE_SHORTCUT    3
@@ -120,7 +122,7 @@ void addSeparatorToShellContextMenu(HMENU hMenu)
 
 void addItemToShellContextMenu(HMENU hMenu, const wchar_t *name, int ID, bool bChecked = false)
 {
-    MENUITEMINFO menu_item_info;
+    MENUITEMINFOW menu_item_info;
     memset(&menu_item_info, 0, sizeof(MENUITEMINFO));
     menu_item_info.cbSize = sizeof(MENUITEMINFO);
     menu_item_info.fMask = MIIM_ID | MIIM_STRING | MIIM_DATA;
@@ -130,7 +132,58 @@ void addItemToShellContextMenu(HMENU hMenu, const wchar_t *name, int ID, bool bC
     }
     menu_item_info.wID = 0xF000 + ID;
     menu_item_info.dwTypeData = (wchar_t*)name;
-    InsertMenuItem(hMenu, 0, TRUE, &menu_item_info);
+    InsertMenuItemW(hMenu, 0, TRUE, &menu_item_info);
+}
+
+void RemoveMenuItemByVerb(HMENU hMenu, IContextMenu* pContextMenu, UINT idCmdFirst, UINT idCmdLast, const std::wstring& verbToRemove)
+{
+    int itemCount = GetMenuItemCount(hMenu);
+    for (int i = itemCount - 1; i >= 0; --i)
+    {
+        MENUITEMINFO menuItemInfo = { 0 };
+        menuItemInfo.cbSize = sizeof(MENUITEMINFO);
+        menuItemInfo.fMask = MIIM_ID | MIIM_SUBMENU;
+
+        if (GetMenuItemInfo(hMenu, i, TRUE, &menuItemInfo))
+        {
+            if (menuItemInfo.hSubMenu)
+            {
+                // Recursive call for submenus
+                RemoveMenuItemByVerb(menuItemInfo.hSubMenu, pContextMenu, idCmdFirst, idCmdLast, verbToRemove);
+
+                // Remove the submenu if it's empty
+                if (GetMenuItemCount(menuItemInfo.hSubMenu) == 0)
+                {
+                    DeleteMenu(hMenu, i, MF_BYPOSITION);
+                }
+            }
+            else
+            {
+                UINT cmdID = menuItemInfo.wID;
+                if (cmdID >= idCmdFirst && cmdID < idCmdLast)
+                {
+                    // Retrieve the verb associated with this command ID
+                    wchar_t verbBuffer[256] = { 0 };
+                    HRESULT hr = pContextMenu->GetCommandString(
+                        cmdID - idCmdFirst,   // Adjust for idCmdFirst
+                        GCS_VERBW,
+                        NULL,
+                        (LPSTR)verbBuffer,
+                        sizeof(verbBuffer) / sizeof(wchar_t)
+                    );
+
+                    if (SUCCEEDED(hr))
+                    {
+                        if (_wcsicmp(verbBuffer, verbToRemove.c_str()) == 0)
+                        {
+                            // Remove the menu item
+                            DeleteMenu(hMenu, i, MF_BYPOSITION);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 int openShellContextMenu(const QStringList& Files, void* parentWindow, const CSandBoxPtr& pBox, QString* pPin = NULL)
@@ -175,14 +228,21 @@ int openShellContextMenu(const QStringList& Files, void* parentWindow, const CSa
         //details.aKeys = NULL;
         SHCreateDefaultContextMenu(&details, IID_IContextMenu, reinterpret_cast<LPVOID*>(&pContextMenu));
     }
-    if (!SUCCEEDED(!pContextMenu))
+    if (!pContextMenu)
         return 0;
 
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu)
         return 0;
-    if (SUCCEEDED(pContextMenu->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL)))
+    UINT idCmdFirst = 1;
+    HRESULT hrMenu = pContextMenu->QueryContextMenu(hMenu, 0, idCmdFirst, 0x7FFF, CMF_NORMAL);
+    if (SUCCEEDED(hrMenu))
     {
+        UINT nMenuItems = HRESULT_CODE(hrMenu);
+        UINT idCmdLast = idCmdFirst + nMenuItems;
+
+        RemoveMenuItemByVerb(hMenu, pContextMenu, idCmdFirst, idCmdLast, L"open");
+
         addSeparatorToShellContextMenu(hMenu);
 
         std::wstring Str1 = CFileView::tr("Create Shortcut").toStdWString();
@@ -198,7 +258,8 @@ int openShellContextMenu(const QStringList& Files, void* parentWindow, const CSa
                 QString FoundPin;
                 QString FileName = Files.first();
                 foreach(const QString & RunOption, RunOptions) {
-		            QString CmdFile = pBoxPlus->GetCommandFile(Split2(RunOption, "|").second);
+		            QVariantMap Entry = GetRunEntry(RunOption);
+		            QString CmdFile = pBoxPlus->GetCommandFile(Entry["Command"].toString());
 		            if(CmdFile.compare(FileName, Qt::CaseInsensitive) == 0) {
                         FoundPin = RunOption;
                         break;
@@ -219,7 +280,7 @@ int openShellContextMenu(const QStringList& Files, void* parentWindow, const CSa
         std::wstring Str3 = CFileView::tr("Recover to Same Folder").toStdWString();
         addItemToShellContextMenu(hMenu, Str3.c_str(), MENU_RECOVER);
         
-        if (!pBox->GetTextList("OnFileRecovery", true, false, true).isEmpty()) {
+        if (!CSandMan::GetFileCheckers(pBox).isEmpty()) {
             std::wstring Str4 = CFileView::tr("Run Recovery Checks").toStdWString();
             addItemToShellContextMenu(hMenu, Str4.c_str(), MENU_CHECK_FILE);
         }
@@ -232,6 +293,17 @@ int openShellContextMenu(const QStringList& Files, void* parentWindow, const CSa
             if ((iCmd & 0xF000) == 0xF000) {
                 DestroyMenu(hMenu);
                 return iCmd & 0x0FFF;
+            }
+
+            wchar_t verbBuffer[256] = {0};
+            HRESULT hr = pContextMenu->GetCommandString(iCmd - 1, GCS_VERBW, NULL, (LPSTR)verbBuffer, sizeof(verbBuffer) / sizeof(wchar_t));
+
+            if (SUCCEEDED(hr)) {
+                qDebug() << verbBuffer;
+                if (_wcsicmp(verbBuffer, L"sandbox") == 0) {
+                    DestroyMenu(hMenu);
+                    return MENU_SANDBOX;
+                }
             }
             
             CMINVOKECOMMANDINFOEX info = { 0 };
@@ -283,33 +355,44 @@ void CFileView::OnFileMenu(const QPoint&)
     QString RecoveryFolder;
     switch (iCmd)
     {
+        case MENU_SANDBOX:{
+            if (!Files.isEmpty()) {
+                QString WrkDir = QFileInfo(Files.first()).absoluteDir().path().replace("/", "\\");
+                foreach(const QString & Command, Files)
+			        theGUI->RunStart(m_pBox->GetName(), Command, CSbieAPI::eStartDefault, WrkDir);
+            }
+            break;
+        }
         case MENU_RECOVER_TO_ANY:
             RecoveryFolder = QFileDialog::getExistingDirectory(this, CFileView::tr("Select Directory")).replace("/", "\\");
             if (RecoveryFolder.isEmpty())
                 break;
         case MENU_RECOVER:
         {
-            QStringList AllFiles;
+            QList<StrPair> AllFiles;
             foreach(const QString& File, Files)
             {
                 if (File.right(1) == "\\") {
+                    int pos = File.lastIndexOf("\\", File.length()-2) + 1;
                     foreach(QString SubFile, ListDir(File))
-                        AllFiles.append(File + SubFile.replace("/", "\\"));
+                        AllFiles.append({ File.left(pos), (File + SubFile.replace("/", "\\")).mid(pos) });
                 }
                 else
-                    AllFiles.append(File);
+                {
+                    int pos = File.lastIndexOf("\\") + 1;
+                    AllFiles.append({ File.left(pos), File.mid(pos) });
+                }
             }
 
             QList<QPair<QString, QString>> FileList;
-            foreach(QString BoxedPath, AllFiles) 
+            foreach(const StrPair& Pair, AllFiles) 
             {
                 if (!RecoveryFolder.isEmpty()) {
-                    QString FileName = BoxedPath.mid(BoxedPath.lastIndexOf("\\") + 1);
-                    FileList.append(qMakePair(BoxedPath, RecoveryFolder + "\\" + FileName));
+                    FileList.append(qMakePair(Pair.first + Pair.second, RecoveryFolder + "\\" + Pair.second));
                 }
                 else {
-                    QString RealPath = theAPI->GetRealPath(m_pBox.data(), BoxedPath);
-                    FileList.append(qMakePair(BoxedPath, RealPath));
+                    QString RealPath = theAPI->GetRealPath(m_pBox.data(), Pair.first + Pair.second);
+                    FileList.append(qMakePair(Pair.first + Pair.second, RealPath));
                 }
             }
 
@@ -330,7 +413,7 @@ void CFileView::OnFileMenu(const QPoint&)
         {
             auto pBoxPlus = m_pBox.objectCast<CSandBoxPlus>();
             if (FoundPin.isEmpty())
-				pBoxPlus->InsertText("RunCommand", Split2(Files.first(), "\\", true).second + "|\"" + pBoxPlus->MakeBoxCommand(Files.first()) + "\"");
+				pBoxPlus->AppendText("RunCommand", Split2(Files.first(), "\\", true).second + "|" + pBoxPlus->MakeBoxCommand(Files.first()));
             else
 				pBoxPlus->DelValue("RunCommand", FoundPin);
             break;
@@ -354,7 +437,8 @@ void CFileView::OnFileMenu(const QPoint&)
 			if (Path.isEmpty())
 				return;
 
-			CSbieUtils::CreateShortcut(theAPI, Path, LinkName, BoxName, LinkPath, LinkPath);
+            QString StartExe = theAPI->GetSbiePath() + "\\SandMan.exe";
+			CSbieUtils::CreateShortcut(StartExe, Path, LinkName, BoxName, LinkPath, LinkPath);
 
             break;
         }
@@ -368,7 +452,7 @@ void CFileView::OnFileDblClick(const QModelIndex &)
 
     QString BoxedPath = m_pFileModel->fileInfo(m_pTreeView->currentIndex()).absoluteFilePath();
 
-    ShellExecute(NULL, NULL, BoxedPath.toStdWString().c_str(), NULL, m_pBox->GetFileRoot().toStdWString().c_str(), SW_SHOWNORMAL);
+    ShellExecuteW(NULL, NULL, BoxedPath.toStdWString().c_str(), NULL, m_pBox->GetFileRoot().toStdWString().c_str(), SW_SHOWNORMAL);
 }
 
 
@@ -387,8 +471,7 @@ CFileBrowserWindow::CFileBrowserWindow(const CSandBoxPtr& pBox, QWidget *parent)
 	//flags &= ~Qt::WindowCloseButtonHint;
 	setWindowFlags(flags);
 
-	bool bAlwaysOnTop = theConf->GetBool("Options/AlwaysOnTop", false);
-	this->setWindowFlag(Qt::WindowStaysOnTopHint, bAlwaysOnTop);
+	this->setWindowFlag(Qt::WindowStaysOnTopHint, theGUI->IsAlwaysOnTop());
 
     m_pMainLayout = new QGridLayout(this);
     m_FileView = new CFileView();

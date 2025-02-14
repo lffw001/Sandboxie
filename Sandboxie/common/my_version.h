@@ -1,6 +1,6 @@
 ﻿/*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2023 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -21,9 +21,22 @@
 #ifndef _MY_VERSION_H
 #define _MY_VERSION_H
 
-#define MY_VERSION_BINARY       5,64,8
-#define MY_VERSION_STRING       "5.64.8"
-#define MY_ABI_VERSION          0x56000
+#define STR2(X) #X
+#define STR(X) STR2(X)
+
+#define VERSION_MJR		5
+#define VERSION_MIN 	70
+#define VERSION_REV 	7
+#define VERSION_UPD 	0
+
+#if VERSION_UPD > 0
+  #define MY_VERSION_BINARY VERSION_MJR,VERSION_MIN,VERSION_REV,VERSION_UPD
+  #define MY_VERSION_STRING STR(VERSION_MJR.VERSION_MIN.VERSION_REV.VERSION_UPD)
+#else
+  #define MY_VERSION_BINARY VERSION_MJR,VERSION_MIN,VERSION_REV
+  #define MY_VERSION_STRING STR(VERSION_MJR.VERSION_MIN.VERSION_REV)
+#endif
+#define MY_ABI_VERSION  0x56900
 
 // These #defines are used by either Resource Compiler or NSIS installer
 #define SBIE_INSTALLER_PATH		"..\\Bin\\"
@@ -32,7 +45,7 @@
 
 #define MY_PRODUCT_NAME_STRING  "Sandboxie"
 #define MY_COMPANY_NAME_STRING  "Sandboxie-Plus.com"
-#define MY_COPYRIGHT_STRING     "Copyright © 2020-2023 by David Xanatos (xanasoft.com)"
+#define MY_COPYRIGHT_STRING     "Copyright © 2020-2025 by David Xanatos (xanasoft.com)"
 #define MY_COPYRIGHT_STRING_OLD "Copyright © 2004-2020 by Sandboxie Holdings, LLC"
 
 #define SANDBOXIE               L"Sandboxie"

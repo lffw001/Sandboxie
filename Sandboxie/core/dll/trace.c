@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 DavidXanatos, xanasoft.com
+ * Copyright 2020-2024 DavidXanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -22,6 +22,8 @@
 #include "dll.h"
 #include "trace.h"
 #include "core/low/lowdata.h"
+
+#include <dbghelp.h>
 
 #ifdef _M_ARM64EC
 void* Hook_GetFFSTarget(void* ptr);
@@ -58,10 +60,13 @@ extern SBIELOW_DATA* SbieApi_data;
 typedef void (*P_RtlSetLastWin32Error)(ULONG err);
 typedef void (*P_OutputDebugString)(const void *str);
 
-
 static P_RtlSetLastWin32Error       __sys_RtlSetLastWin32Error      = NULL;
 static P_OutputDebugString          __sys_OutputDebugStringW        = NULL;
 static P_OutputDebugString          __sys_OutputDebugStringA        = NULL;
+
+BOOLEAN Dll_SbieTrace = FALSE;
+BOOLEAN Dll_ApiTrace = FALSE;
+BOOLEAN Dll_FileTrace = FALSE;
 
 
 //---------------------------------------------------------------------------
@@ -71,44 +76,41 @@ static P_OutputDebugString          __sys_OutputDebugStringA        = NULL;
 
 _FX int Trace_Init(void)
 {
-    HMODULE module = NULL;
-
     Dll_SbieTrace = SbieApi_QueryConfBool(NULL, L"SbieTrace", FALSE);
 
-    if (SbieApi_QueryConfBool(NULL, L"DebugTrace", FALSE)) {
+    Dll_ApiTrace = Config_GetSettingsForImageName_bool(L"ApiTrace", FALSE);
 
-        P_RtlSetLastWin32Error RtlSetLastWin32Error;
-        P_OutputDebugString OutputDebugStringW;
-        P_OutputDebugString OutputDebugStringA;
+    Dll_FileTrace = Config_GetSettingsForImageName_bool(L"FileTrace", FALSE);
+
+    if (SbieApi_QueryConfBool(NULL, L"ErrorTrace", FALSE)) {
 
         //
         // intercept NTDLL entry points
         //
+        HMODULE module = Dll_Ntdll;
 
-        if (SbieApi_QueryConfBool(NULL, L"ErrorTrace", FALSE)) {
-            RtlSetLastWin32Error = (P_RtlSetLastWin32Error)
-                GetProcAddress(Dll_Ntdll, "RtlSetLastWin32Error");
-            SBIEDLL_HOOK(Trace_, RtlSetLastWin32Error);
-        }
+        P_RtlSetLastWin32Error RtlSetLastWin32Error = (P_RtlSetLastWin32Error)
+            GetProcAddress(Dll_Ntdll, "RtlSetLastWin32Error");
+        SBIEDLL_HOOK(Trace_, RtlSetLastWin32Error);
+    }
+
+    if (SbieApi_QueryConfBool(NULL, L"DebugTrace", FALSE)) {
 
         //
         // intercept KERNEL32 entry points
         //
+        HMODULE module = Dll_Kernel32;
 
-        OutputDebugStringW = (P_OutputDebugString)
+        P_OutputDebugString OutputDebugStringW = (P_OutputDebugString)
             GetProcAddress(Dll_Kernel32, "OutputDebugStringW");
         SBIEDLL_HOOK(Trace_, OutputDebugStringW);
 
-        OutputDebugStringA = (P_OutputDebugString)
+        P_OutputDebugString OutputDebugStringA = (P_OutputDebugString)
             GetProcAddress(Dll_Kernel32, "OutputDebugStringA");
         SBIEDLL_HOOK(Trace_, OutputDebugStringA);
 
 
         OutputDebugString(L"SbieDll injected...\n");
-        for (int i = 0; i < 16; i++) {
-            if (SbieApi_data->DebugData[i] != 0)
-                DbgPrint("DebugData[%d]: %p\n", i, (UINT_PTR)SbieApi_data->DebugData[i]);
-        }
     }
 
     //
@@ -116,12 +118,24 @@ _FX int Trace_Init(void)
     //
 
     WCHAR wsTraceOptions[4];
-    if (SbieApi_QueryConf(NULL, L"CallTrace", 0, wsTraceOptions, sizeof(wsTraceOptions)) == STATUS_SUCCESS && wsTraceOptions[0] != L'\0') {
+    if (SbieApi_QueryConf(NULL, L"CallTraceEx", 0, wsTraceOptions, sizeof(wsTraceOptions)) == STATUS_SUCCESS && wsTraceOptions[0] != L'\0') {
         if (!NT_SUCCESS(InstallInstrumentationCallback()))
             SbieApi_Log(2205, L"ProcessInstrumentationCallback");
     }
 
     return TRUE;
+}
+
+//---------------------------------------------------------------------------
+// Trace_Init
+//---------------------------------------------------------------------------
+
+
+_FX void Trace_Entry(void)
+{
+#ifdef WITH_DEBUG
+    DbgTrace("Dll_InitExeEntry completed");
+#endif
 }
 
 
@@ -400,6 +414,33 @@ ULONG_PTR NTAPI InstrumentationCallback(
 
 
 //---------------------------------------------------------------------------
+// ApiInstrumentation
+//---------------------------------------------------------------------------
+
+#ifdef _WIN64
+void ApiInstrumentation(const char* pName, void** pStack)
+#else
+void __fastcall ApiInstrumentation(const char* pName, void** pStack)
+#endif
+{
+    void* ReturnAddress = *(pStack - 1);
+
+    TEB* pTEB = NtCurrentTeb();
+    ULONG_PTR* sbie_deph = (ULONG_PTR*)&pTEB->ReservedForDebuggerInstrumentation[15];
+    if (*sbie_deph)
+        return;
+    *sbie_deph += 1;
+
+    WCHAR trace_str[256];
+    //ULONG len = Sbie_snwprintf(trace_str, 128, L"%S <-- %s%S", pName, CallingModule, pCaller ? pCaller : "");
+    ULONG len = Sbie_snwprintf(trace_str, 128, L"%S", pName);
+    SbieApi_MonitorPut2Ex(MONITOR_APICALL | MONITOR_TRACE, len, trace_str, FALSE, FALSE);
+
+    *sbie_deph -= 1;
+}
+
+
+//---------------------------------------------------------------------------
 // Trace_SbieDrvFunc2Str
 //---------------------------------------------------------------------------
 
@@ -559,6 +600,7 @@ const wchar_t* Trace_SbieSvcFunc2Str(ULONG func)
         case MSGID_QUEUE_PUTRPL:                return L"MSGID_QUEUE_PUTRPL";
         case MSGID_QUEUE_PUTREQ:                return L"MSGID_QUEUE_PUTREQ";
         case MSGID_QUEUE_GETRPL:                return L"MSGID_QUEUE_GETRPL";
+        case MSGID_QUEUE_STARTUP:               return L"MSGID_QUEUE_STARTUP";
         case MSGID_QUEUE_NOTIFICATION:          return L"MSGID_QUEUE_NOTIFICATION";
 
         case MSGID_EPMAPPER_GET_PORT_NAME:      return L"MSGID_EPMAPPER_GET_PORT_NAME";

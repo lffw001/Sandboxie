@@ -218,8 +218,6 @@ _FX void File_InitCopyLimit(void)
 {
     static const WCHAR* _CopyLimitKb = L"CopyLimitKb";
     static const WCHAR* _CopyLimitSilent = L"CopyLimitSilent";
-    NTSTATUS status;
-    WCHAR str[32];
 
     //
     // if this is one of SandboxieCrypto, SandboxieWUAU or WUAUCLT,
@@ -247,18 +245,8 @@ _FX void File_InitCopyLimit(void)
     // get configuration settings for CopyLimitKb and CopyLimitSilent
     //
 
-    status = SbieApi_QueryConfAsIs(
-        NULL, _CopyLimitKb, 0, str, sizeof(str) - sizeof(WCHAR));
-    if (NT_SUCCESS(status)) {
-        ULONGLONG num = _wtoi64(str);
-        if (num)
-            File_CopyLimitKb = (num > 0x000000007fffffff) ? -1 : num;
-        else
-            SbieApi_Log(2207, _CopyLimitKb);
-    }
-
-    File_CopyLimitSilent =
-        SbieApi_QueryConfBool(NULL, _CopyLimitSilent, FALSE);
+    File_CopyLimitKb = SbieApi_QueryConfNumber64(NULL, _CopyLimitKb, -1);
+    File_CopyLimitSilent = SbieApi_QueryConfBool(NULL, _CopyLimitSilent, FALSE);
 }
 
 
@@ -280,6 +268,7 @@ _FX NTSTATUS File_MigrateFile(
     ULONGLONG file_size;
     ACCESS_MASK DesiredAccess;
     ULONG CreateOptions;
+    PSECURITY_DESCRIPTOR pSecurityDescriptor = NULL;
 
     InitializeObjectAttributes(
         &objattrs, &objname, OBJ_CASE_INSENSITIVE, NULL, Secure_NormalSD);
@@ -354,6 +343,34 @@ _FX NTSTATUS File_MigrateFile(
     else
         file_size = 0;
 
+    if (Secure_CopyACLs) {
+
+        //
+        // Query the security descriptor of the source file
+        //
+
+        ULONG lengthNeeded = 0;
+        status = NtQuerySecurityObject(TrueHandle, DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION | /*OWNER_SECURITY_INFORMATION |*/ GROUP_SECURITY_INFORMATION, NULL, 0, &lengthNeeded);
+        if (status == STATUS_BUFFER_TOO_SMALL) {
+            pSecurityDescriptor = (PSECURITY_DESCRIPTOR)Dll_AllocTemp(lengthNeeded);
+            status = NtQuerySecurityObject(TrueHandle, DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION | /*OWNER_SECURITY_INFORMATION |*/ GROUP_SECURITY_INFORMATION, pSecurityDescriptor, lengthNeeded, &lengthNeeded);
+            if (NT_SUCCESS(status)) 
+                File_AddCurrentUserToSD(&pSecurityDescriptor);
+            else {
+                Dll_Free(pSecurityDescriptor);
+                pSecurityDescriptor = NULL;
+            }
+        }
+
+        if (!NT_SUCCESS(status)) {
+            NtClose(TrueHandle);
+            return status;
+        }
+
+        InitializeObjectAttributes(
+            &objattrs, &objname, OBJ_CASE_INSENSITIVE, NULL, pSecurityDescriptor);
+    }
+
     //
     // create the CopyPath file
     //
@@ -377,6 +394,8 @@ _FX NTSTATUS File_MigrateFile(
 
     if (!NT_SUCCESS(status)) {
         NtClose(TrueHandle);
+        if(pSecurityDescriptor)
+            Dll_Free(pSecurityDescriptor);
         return status;
     }
 
@@ -418,12 +437,12 @@ _FX NTSTATUS File_MigrateFile(
 
             ULONG Cur_Ticks = GetTickCount();
             if (Next_Status < Cur_Ticks) {
-                Next_Status = Cur_Ticks + 1000; // update prgress every second
+                Next_Status = Cur_Ticks + 1000; // update progress every second
 
                 WCHAR size_str[32];
                 Sbie_snwprintf(size_str, 32, L"%I64u", file_size);
                 const WCHAR* strings[] = { Dll_BoxName, TruePath, size_str, NULL };
-                SbieApi_LogMsgExt(2198, strings);
+                SbieApi_LogMsgExt(-1, 2198, strings);
             }
         }
 
@@ -462,6 +481,151 @@ _FX NTSTATUS File_MigrateFile(
     }
 
     NtClose(TrueHandle);
+    if(pSecurityDescriptor)
+        Dll_Free(pSecurityDescriptor);
+    NtClose(CopyHandle);
+
+    return status;
+}
+
+
+//---------------------------------------------------------------------------
+// File_MigrateJunction
+//---------------------------------------------------------------------------
+
+
+_FX NTSTATUS File_MigrateJunction(
+    const WCHAR* TruePath, const WCHAR* CopyPath,
+    BOOLEAN IsWritePath)
+{
+    NTSTATUS status;
+    HANDLE TrueHandle, CopyHandle;
+    OBJECT_ATTRIBUTES objattrs;
+    UNICODE_STRING objname;
+    IO_STATUS_BLOCK IoStatusBlock;
+    FILE_NETWORK_OPEN_INFORMATION open_info;
+    PSECURITY_DESCRIPTOR pSecurityDescriptor = NULL;
+
+    InitializeObjectAttributes(
+        &objattrs, &objname, OBJ_CASE_INSENSITIVE, NULL, Secure_NormalSD);
+
+    //
+    // open TruePath.  if we get a sharing violation trying to open it,
+    // try to get the driver to open it bypassing share access.  if even
+    // this fails, then we can't copy the data, but can still create an
+    // empty file
+    //
+
+    RtlInitUnicodeString(&objname, TruePath);
+
+    status = __sys_NtCreateFile(
+        &TrueHandle, FILE_GENERIC_READ, &objattrs, &IoStatusBlock,
+        NULL, 0, FILE_SHARE_VALID_FLAGS,
+        FILE_OPEN, FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+
+    /*if (IsWritePath && status == STATUS_ACCESS_DENIED)
+        status = STATUS_SHARING_VIOLATION;
+
+    if (status == STATUS_SHARING_VIOLATION) {
+
+        status = SbieApi_OpenFile(&TrueHandle, TruePath);
+    }*/
+
+    if (!NT_SUCCESS(status))
+        return status;
+
+    //
+    // query attributes and size of the TruePath file
+    //
+
+    status = __sys_NtQueryInformationFile(
+        TrueHandle, &IoStatusBlock, &open_info,
+        sizeof(FILE_NETWORK_OPEN_INFORMATION), FileNetworkOpenInformation);
+
+    //
+    // Get the reparse point data from the source
+    //
+
+    BYTE buf[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];  // We need a large buffer
+    REPARSE_DATA_BUFFER* reparseDataBuffer = (REPARSE_DATA_BUFFER*)buf;
+    status = __sys_NtFsControlFile(TrueHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_GET_REPARSE_POINT, NULL, 0, reparseDataBuffer, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+
+    if (!NT_SUCCESS(status))
+        return status;
+
+    if (Secure_CopyACLs) {
+
+        //
+        // Query the security descriptor of the source file
+        //
+
+        ULONG lengthNeeded = 0;
+        status = NtQuerySecurityObject(TrueHandle, DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION | /*OWNER_SECURITY_INFORMATION |*/ GROUP_SECURITY_INFORMATION, NULL, 0, &lengthNeeded);
+        if (status == STATUS_BUFFER_TOO_SMALL) {
+            pSecurityDescriptor = (PSECURITY_DESCRIPTOR)Dll_AllocTemp(lengthNeeded);
+            status = NtQuerySecurityObject(TrueHandle, DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION | /*OWNER_SECURITY_INFORMATION |*/ GROUP_SECURITY_INFORMATION, pSecurityDescriptor, lengthNeeded, &lengthNeeded);
+            if (NT_SUCCESS(status)) 
+                File_AddCurrentUserToSD(&pSecurityDescriptor);
+            else {
+                Dll_Free(pSecurityDescriptor);
+                pSecurityDescriptor = NULL;
+            }
+        }
+
+        if (!NT_SUCCESS(status)) {
+            NtClose(TrueHandle);
+            return status;
+        }
+
+        InitializeObjectAttributes(
+            &objattrs, &objname, OBJ_CASE_INSENSITIVE, NULL, pSecurityDescriptor);
+    }
+
+    //
+    // Create the destination file with reparse point data
+    //
+
+    RtlInitUnicodeString(&objname, CopyPath);
+
+    status = __sys_NtCreateFile(
+        &CopyHandle, FILE_GENERIC_WRITE, &objattrs, &IoStatusBlock,
+        NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_VALID_FLAGS,
+        FILE_CREATE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+        NULL, 0);
+
+    if (!NT_SUCCESS(status)) {
+        NtClose(TrueHandle);
+        if (pSecurityDescriptor)
+            Dll_Free(pSecurityDescriptor);
+    }
+
+    //
+    // Set the reparse point data to the destination
+    //
+
+    #define REPARSE_MOUNTPOINT_HEADER_SIZE 8
+    status = __sys_NtFsControlFile(CopyHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_SET_REPARSE_POINT, reparseDataBuffer, REPARSE_MOUNTPOINT_HEADER_SIZE + reparseDataBuffer->ReparseDataLength, NULL, 0);
+
+    //
+    // set information on the CopyPath file
+    //
+
+    if (NT_SUCCESS(status)) {
+
+        FILE_BASIC_INFORMATION info;
+
+        info.CreationTime.QuadPart = open_info.CreationTime.QuadPart;
+        info.LastAccessTime.QuadPart = open_info.LastAccessTime.QuadPart;
+        info.LastWriteTime.QuadPart = open_info.LastWriteTime.QuadPart;
+        info.ChangeTime.QuadPart = open_info.ChangeTime.QuadPart;
+        info.FileAttributes = open_info.FileAttributes;
+
+        status = File_SetAttributes(CopyHandle, CopyPath, &info);
+    }
+
+    NtClose(TrueHandle);
+    if(pSecurityDescriptor)
+        Dll_Free(pSecurityDescriptor);
     NtClose(CopyHandle);
 
     return status;

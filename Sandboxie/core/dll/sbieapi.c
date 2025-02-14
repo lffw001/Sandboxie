@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2022 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -28,10 +28,12 @@
 #include "core/drv/api_defs.h"
 #include "core/svc/msgids.h"
 #include "common/my_version.h"
-//#include "core/low/lowdata.h"
-//
-//extern SBIELOW_DATA* SbieApi_data;
-//#define SBIELOW_CALL(x) ((P_##x)&SbieApi_data->x##_code)
+#include "core/low/lowdata.h"
+
+extern SBIELOW_DATA* SbieApi_data;
+#define SBIELOW_CALL(x) ((P_##x)&SbieApi_data->x##_code)
+
+extern P_NtDeviceIoControlFile __sys_NtDeviceIoControlFile;
 
 #pragma optimize("",off)
 
@@ -144,8 +146,26 @@ _FX NTSTATUS SbieApi_Ioctl(ULONG64 *parms)
         // processing a request before sending the next request
         //
 
-        extern P_NtDeviceIoControlFile __sys_NtDeviceIoControlFile;
-        if (__sys_NtDeviceIoControlFile) {
+        /*BOOLEAN IsNative = SbieApi_data && !SbieApi_data->flags.bNoSysHooks
+#ifndef _WIN64
+            && !Dll_IsWow64
+#endif
+#ifdef _M_ARM64EC
+            && !Dll_IsArm64ec
+#endif
+            ;
+
+        if (IsNative) {
+
+            //
+            // when we are native we can call NtDeviceIoControlFile directly
+            //
+
+            status = SBIELOW_CALL(NtDeviceIoControlFile)(
+                SbieApi_DeviceHandle, NULL, NULL, NULL, &MyIoStatusBlock,
+                API_SBIEDRV_CTLCODE, parms, sizeof(ULONG64) * 8, NULL, 0);
+
+        } else*/ if (__sys_NtDeviceIoControlFile) {
         
             //
             // once NtDeviceIoControlFile is hooked, bypass it
@@ -162,10 +182,6 @@ _FX NTSTATUS SbieApi_Ioctl(ULONG64 *parms)
                 API_SBIEDRV_CTLCODE, parms, sizeof(ULONG64) * 8, NULL, 0);
         }
 
-        // that would be even better but would only work in the native case
-        //status = SBIELOW_CALL(NtDeviceIoControlFile)(
-        //        SbieApi_DeviceHandle, NULL, NULL, NULL, &MyIoStatusBlock,
-        //        API_SBIEDRV_CTLCODE, parms, sizeof(ULONG64) * 8, NULL, 0);
     }
 
     return status;
@@ -426,6 +442,7 @@ _FX LONG SbieApi_LogMsgEx(
 
 
 _FX LONG SbieApi_LogMsgExt(
+	ULONG session_id,
 	ULONG msgid,
 	const WCHAR** strings)
 {
@@ -446,7 +463,7 @@ _FX LONG SbieApi_LogMsgExt(
 			temp += len;
 		}
 
-		status = SbieApi_LogMsgEx(-1, msgid, buff, (USHORT)size);
+		status = SbieApi_LogMsgEx(session_id, msgid, buff, (USHORT)size);
 
 		Dll_Free(buff);
 
@@ -662,12 +679,53 @@ _FX ULONG64 SbieApi_QueryProcessInfoEx(
 
 
 //---------------------------------------------------------------------------
+// SbieApi_QueryProcessInfoStr
+//---------------------------------------------------------------------------
+
+
+_FX LONG SbieApi_QueryProcessInfoStr(
+    HANDLE ProcessId,
+    ULONG info_type,
+    WCHAR *out_str,
+    ULONG *inout_str_len)
+{
+    NTSTATUS status;
+    __declspec(align(8)) UNICODE_STRING64 UniStr;
+    __declspec(align(8)) ULONG64 parms[API_NUM_ARGS];
+    API_QUERY_PROCESS_INFO_ARGS *args = (API_QUERY_PROCESS_INFO_ARGS *)parms;
+
+    memzero(parms, sizeof(parms));
+    args->func_code             = API_QUERY_PROCESS_INFO;
+
+    args->process_id.val64      = (ULONG64)(ULONG_PTR)ProcessId;
+    args->info_type.val64       = (ULONG64)(ULONG_PTR)info_type;
+    args->info_data.val64       = (ULONG64)(ULONG_PTR)inout_str_len;
+
+    if (out_str) {
+        UniStr.Length = 0;
+        UniStr.MaximumLength = (USHORT)*inout_str_len;
+        UniStr.Buffer = (ULONG64)(ULONG_PTR)out_str;
+        args->ext_data.val64 = (ULONG64)(ULONG_PTR)&UniStr;
+    }
+
+    status = SbieApi_Ioctl(parms);
+
+    if (!NT_SUCCESS(status)) {
+        if (out_str)
+            *out_str = L'\0';
+    }
+
+    return status;
+}
+
+
+//---------------------------------------------------------------------------
 // SbieApi_QueryBoxPath
 //---------------------------------------------------------------------------
 
 
 _FX LONG SbieApi_QueryBoxPath(
-    const WCHAR *box_name,              // WCHAR [34]
+    const WCHAR *box_name,              // WCHAR [BOXNAME_COUNT]
     WCHAR *out_file_path,
     WCHAR *out_key_path,
     WCHAR *out_ipc_path,
@@ -828,7 +886,7 @@ _FX LONG SbieApi_QueryPathList(
 
 
 _FX LONG SbieApi_EnumProcessEx(
-    const WCHAR *box_name,          // WCHAR [34]
+    const WCHAR *box_name,          // WCHAR [BOXNAME_COUNT]
     BOOLEAN all_sessions,
     ULONG which_session,            // -1 for current session
     ULONG *boxed_pids,              // ULONG [512]
@@ -946,8 +1004,9 @@ _FX LONG SbieApi_RenameFile(
 
 _FX LONG SbieApi_GetFileName(
     HANDLE FileHandle,
-    ULONG NameLen,
-    WCHAR *NameBuf)
+    WCHAR *NameBuf,
+    ULONG *NameLen,
+    ULONG *ObjType)
 {
     NTSTATUS status;
     __declspec(align(8)) ULONG64 parms[API_NUM_ARGS];
@@ -958,6 +1017,7 @@ _FX LONG SbieApi_GetFileName(
     args->handle.val64            = (ULONG64)(ULONG_PTR)FileHandle;
     args->name_len.val64          = (ULONG64)(ULONG_PTR)NameLen;
     args->name_buf.val64          = (ULONG64)(ULONG_PTR)NameBuf;
+    args->type_buf.val64          = (ULONG64)(ULONG_PTR)ObjType;
     status = SbieApi_Ioctl(parms);
 
     if (! NT_SUCCESS(status)) {
@@ -1289,6 +1349,27 @@ _FX LONG SbieApi_QuerySymbolicLink(
 
 
 //---------------------------------------------------------------------------
+// SbieApi_QueryDrvInfo
+//---------------------------------------------------------------------------
+
+
+_FX LONG SbieApi_QueryDrvInfo(ULONG info_class, VOID* info_data, ULONG info_size)
+{
+    NTSTATUS status;
+    __declspec(align(8)) ULONG64 parms[API_NUM_ARGS];
+
+    memset(parms, 0, sizeof(parms));
+    parms[0] = API_QUERY_DRIVER_INFO;
+    parms[1] = info_class;
+    parms[2] = (ULONG64)(ULONG_PTR)info_data;
+    parms[3] = info_size;
+    status = SbieApi_Ioctl(parms);
+
+    return status;
+}
+
+
+//---------------------------------------------------------------------------
 // SbieApi_ReloadConf
 //---------------------------------------------------------------------------
 
@@ -1396,7 +1477,7 @@ _FX BOOLEAN SbieApi_QueryConfBool(
 
 
 //---------------------------------------------------------------------------
-// SbieApi_QueryConfBool
+// SbieApi_QueryConfNumber
 //---------------------------------------------------------------------------
 
 
@@ -1426,13 +1507,43 @@ _FX ULONG SbieApi_QueryConfNumber(
 
 
 //---------------------------------------------------------------------------
+// SbieApi_QueryConfNumber64
+//---------------------------------------------------------------------------
+
+
+_FX ULONG64 SbieApi_QueryConfNumber64(
+    const WCHAR *section_name,      // WCHAR [66]
+    const WCHAR *setting_name,      // WCHAR [66]
+    ULONG64 def)
+{
+    WCHAR value[64];
+    *value = L'\0';
+    if (!NT_SUCCESS(SbieApi_QueryConfAsIs(
+                    section_name, setting_name, 0, value, sizeof(value)))
+        || *value == L'\0') // empty string
+        return def;
+    ULONG64 num = _wtoi64(value);
+    if (num == 0) {
+        WCHAR* ptr = value;
+        //if(*ptr == L'-')
+        //    ptr++;
+        while (*ptr == L'0')
+            ptr++;
+        if(*ptr == L'\0')
+            return def;
+    }
+    return num;
+}
+
+
+//---------------------------------------------------------------------------
 // SbieApi_EnumBoxes
 //---------------------------------------------------------------------------
 
 
 _FX LONG SbieApi_EnumBoxes(
     LONG index,                     // initialize to -1
-    WCHAR *box_name)                // WCHAR [34]
+    WCHAR *box_name)                // WCHAR [BOXNAME_COUNT]
 {
     return SbieApi_EnumBoxesEx(index, box_name, FALSE);
 }
@@ -1445,7 +1556,7 @@ _FX LONG SbieApi_EnumBoxes(
 
 _FX LONG SbieApi_EnumBoxesEx(
     LONG index,                     // initialize to -1
-    WCHAR *box_name,                // WCHAR [34]
+    WCHAR *box_name,                // WCHAR [BOXNAME_COUNT]
     BOOLEAN return_all_sections)
 {
     LONG rc;
@@ -1705,7 +1816,7 @@ _FX LONG SbieApi_GetUnmountHive(
 //---------------------------------------------------------------------------
 
 
-_FX LONG SbieApi_SessionLeader(HANDLE TokenHandle, HANDLE *ProcessId)
+_FX LONG SbieApi_SessionLeader(ULONG session_id, HANDLE *ProcessId)
 {
     NTSTATUS status;
     __declspec(align(8)) ULONG64 ResultValue;
@@ -1715,9 +1826,11 @@ _FX LONG SbieApi_SessionLeader(HANDLE TokenHandle, HANDLE *ProcessId)
     memset(parms, 0, sizeof(parms));
     args->func_code               = API_SESSION_LEADER;
     if (ProcessId) {
-        args->token_handle.val64  = (ULONG64)(ULONG_PTR)TokenHandle;
+        args->session_id.val64    = (ULONG64)(ULONG_PTR)session_id;
+        args->token_handle.val64  = 0;
         args->process_id.val64    = (ULONG64)(ULONG_PTR)&ResultValue;
     } else {
+        args->session_id.val64    = 0;
         args->token_handle.val64  = 0;
         args->process_id.val64    = 0;
     }
@@ -1738,7 +1851,7 @@ _FX LONG SbieApi_SessionLeader(HANDLE TokenHandle, HANDLE *ProcessId)
 
 
 _FX LONG SbieApi_IsBoxEnabled(
-    const WCHAR *box_name)          // WCHAR [34]
+    const WCHAR *box_name)          // WCHAR [BOXNAME_COUNT]
 {
     NTSTATUS status;
     __declspec(align(8)) ULONG64 parms[API_NUM_ARGS];

@@ -58,9 +58,7 @@ struct _PROCESS {
     // process id
 
     HANDLE pid;
-#ifdef DRV_BREAKOUT
     HANDLE starter_id;
-#endif
 
     // process pool.  created on process creation.  it is freed in its
     // entirety when the process terminates
@@ -239,8 +237,11 @@ void Process_Unload(BOOLEAN FreeLock);
 
 PROCESS *Process_Find(HANDLE ProcessId, KIRQL *out_irql);
 
+#ifdef XP_SUPPORT
 PROCESS *Process_FindSandboxed(HANDLE ProcessId, KIRQL *out_irql);
+#endif
 
+//PROCESS *Process_Find_ByHandle(HANDLE Handle, KIRQL *out_irql);
 
 // Start supervising a new process
 
@@ -449,6 +450,11 @@ void Process_DfpDelete(HANDLE ProcessId);
 
 BOOLEAN Process_DfpCheck(HANDLE ProcessId, BOOLEAN *silent);
 
+// Force Child Processes
+
+VOID Process_FcpInsert(HANDLE ProcessId, const WCHAR* boxname);
+void Process_FcpDelete(HANDLE ProcessId);
+BOOLEAN Process_FcpCheck(HANDLE ProcessId, WCHAR* boxname);
 
 // Enumerate or count processes in a sandbox
 
@@ -524,6 +530,8 @@ NTSTATUS Process_Api_QueryPathList(PROCESS *proc, ULONG64 *parms);
 
 NTSTATUS Process_Api_Enum(PROCESS *proc, ULONG64 *parms);
 
+NTSTATUS Process_Api_Kill(PROCESS *proc, ULONG64 *parms);
+
 
 //---------------------------------------------------------------------------
 // Variables
@@ -533,9 +541,11 @@ NTSTATUS Process_Api_Enum(PROCESS *proc, ULONG64 *parms);
 #ifdef USE_PROCESS_MAP
 extern HASH_MAP Process_Map;
 extern HASH_MAP Process_MapDfp;
+extern HASH_MAP Process_MapFcp;
 #else
 extern LIST Process_List;
 extern LIST Process_ListDfp;
+extern LIST Process_ListFcp;
 #endif
 extern PERESOURCE Process_ListLock;
 

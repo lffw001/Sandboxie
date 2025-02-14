@@ -92,7 +92,7 @@ _FX NTSTATUS Process_Api_Start(PROCESS *proc, ULONG64 *parms)
         KIRQL irql;
 
         proc2 = Process_Find((HANDLE)(-user_box_parm), &irql);
-        if (proc2)
+        if (proc2 && !proc2->terminated)
             box = Box_Clone(Driver_Pool, proc2->box);
 
         ExReleaseResourceLite(Process_ListLock);
@@ -212,8 +212,22 @@ _FX NTSTATUS Process_Api_Query(PROCESS *proc, ULONG64 *parms)
     // this is the first SbieApi call by SbieDll
     //
 
-    if (proc)
+    if (proc && !proc->sbiedll_loaded) {
+
         proc->sbiedll_loaded = TRUE;
+
+        //
+        // On windows 10 it was observed that the PCA service is assigning its job 
+        // after sandboxie's job was already assigned, so we re check here,
+        // and when needed restart the process from the sbiedll outside a PCA job.
+        //
+
+        if (proc->forced_process && Driver_OsVersion >= DRIVER_WINDOWS_10) {
+
+            if (Process_IsInPcaJob(proc->pid))
+                proc->in_pca_job = TRUE;
+        }
+    }
 
     //
     // if a ProcessId was specified, then locate and lock the matching
@@ -231,7 +245,7 @@ _FX NTSTATUS Process_Api_Query(PROCESS *proc, ULONG64 *parms)
     if (ProcessId) {
 
         proc = Process_Find(ProcessId, &irql);
-        if (! proc) {
+        if (!proc || proc->terminated) {
             ExReleaseResourceLite(Process_ListLock);
             KeLowerIrql(irql);
             return STATUS_INVALID_CID;
@@ -329,7 +343,7 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
     if (ProcessId) {
 
         proc = Process_Find(ProcessId, &irql);
-        if (! proc) {
+        if (!proc || proc->terminated) {
             ExReleaseResourceLite(Process_ListLock);
             KeLowerIrql(irql);
             return STATUS_INVALID_CID;
@@ -342,9 +356,6 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
     status = STATUS_SUCCESS;
 
     __try {
-
-        ULONG64 *data = args->info_data.val;
-        ProbeForWrite(data, sizeof(ULONG64), sizeof(ULONG64));
 
         if (args->info_type.val == 0) {
 
@@ -396,17 +407,23 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
                 flags = SBIE_FLAG_HOST_INJECT_PROCESS;
             }
 
-            *data = flags;
+            ProbeForWrite(args->info_data.val, sizeof(ULONG64), sizeof(ULONG64));
+            *args->info_data.val = flags;
 
         } else if (args->info_type.val == 'pril') {
 
-            *data = proc->integrity_level;
+            ProbeForWrite(args->info_data.val, sizeof(ULONG64), sizeof(ULONG64));
+            *args->info_data.val = proc->integrity_level;
 
         } else if (args->info_type.val == 'nt32') {
 
-            *data = proc->ntdll32_base;
+            ProbeForWrite(args->info_data.val, sizeof(ULONG64), sizeof(ULONG64));
+            *args->info_data.val = proc->ntdll32_base;
 
         } else if (args->info_type.val == 'ptok') { // primary token
+
+            ULONG64 *data = args->info_data.val;
+            ProbeForWrite(data, sizeof(ULONG64), sizeof(ULONG64));
 
 			if(is_caller_sandboxed)
 				status = STATUS_ACCESS_DENIED;
@@ -434,6 +451,9 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
 			}
 
 		} else if (args->info_type.val == 'itok' || args->info_type.val == 'ttok') { // impersonation token / test thread token
+
+            ULONG64 *data = args->info_data.val;
+            ProbeForWrite(data, sizeof(ULONG64), sizeof(ULONG64));
 
 			if(is_caller_sandboxed)
 				status = STATUS_ACCESS_DENIED;
@@ -492,6 +512,9 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
 
 		} else if (args->info_type.val == 'ippt') { // is primary process token
 
+            ULONG64 *data = args->info_data.val;
+            ProbeForWrite(data, sizeof(ULONG64), sizeof(ULONG64));
+
             HANDLE handle = (HANDLE)(args->ext_data.val);
 
             OBJECT_TYPE* object;
@@ -510,11 +533,34 @@ _FX NTSTATUS Process_Api_QueryInfo(PROCESS *proc, ULONG64 *parms)
             
             proc->detected_image_type = (ULONG)(args->ext_data.val);
 
-            *data = 0;
-
         } else if (args->info_type.val == 'gpit') { // get process image type
             
-            *data = proc->detected_image_type;
+            ProbeForWrite(args->info_data.val, sizeof(ULONG64), sizeof(ULONG64));
+            *args->info_data.val = proc->detected_image_type;
+
+        } else if (args->info_type.val == 'root') {
+            
+            //
+            // When querying a sandboxed process API_QUERY_PROCESS_PATH return the reparsed file root path
+            // this info class is used to retrieve the raw i.e. not reparsed file root path
+            // 
+            // Note: API_QUERY_BOX_PATH when invoked by a sandboxed process also returns its reparsed file root path
+            //
+            
+            if(!proc->box->file_raw_path)
+                status = STATUS_VARIABLE_NOT_FOUND;
+            else
+            {
+                ULONG* file_path_len = (ULONG*)args->info_data.val64;
+                UNICODE_STRING64 *file_path = (UNICODE_STRING64*)args->ext_data.val64;
+
+                if (file_path_len) {
+                    ProbeForWrite(file_path_len, sizeof(ULONG), sizeof(ULONG));
+                    *file_path_len = proc->box->file_raw_path_len;
+                }
+
+                Api_CopyStringToUser(file_path, proc->box->file_raw_path, proc->box->file_raw_path_len);
+            }
 
         } else
             status = STATUS_INVALID_INFO_CLASS;
@@ -617,7 +663,7 @@ _FX NTSTATUS Process_Api_QueryProcessPath(PROCESS *proc, ULONG64 *parms)
     if (ProcessId) {
 
         proc = Process_Find(ProcessId, &irql);
-        if ((! proc) || proc->terminated) {
+        if (!proc || proc->terminated) {
             ExReleaseResourceLite(Process_ListLock);
             KeLowerIrql(irql);
             return STATUS_INVALID_CID;
@@ -733,7 +779,7 @@ _FX NTSTATUS Process_Api_QueryPathList(PROCESS *proc, ULONG64 *parms)
 
         proc = Process_Find(args->process_id.val, &irql);
 
-        if (! proc) {
+        if (!proc || proc->terminated) {
 
             ExReleaseResourceLite(Process_ListLock);
             KeLowerIrql(irql);
@@ -1077,6 +1123,81 @@ _FX NTSTATUS Process_Api_Enum(PROCESS *proc, ULONG64 *parms)
         return status;
 
     *user_count = count;
+
+    return status;
+}
+
+
+//---------------------------------------------------------------------------
+// Process_Api_Enum
+//---------------------------------------------------------------------------
+
+
+_FX NTSTATUS Process_Api_Kill(PROCESS *proc, ULONG64 *parms)
+{
+    NTSTATUS status;
+    HANDLE user_pid_parm;
+    HANDLE handle = NULL;
+    PEPROCESS ProcessObject = NULL;
+    PROCESS *proc2;
+
+    //
+    // security check, only service is allowed this call
+    //
+
+    if (proc || (PsGetCurrentProcessId() != Api_ServiceProcessId))
+        return STATUS_NOT_IMPLEMENTED;
+
+    //
+    // first parameter is pid
+    //
+
+    user_pid_parm = (HANDLE)parms[1];
+
+    if (! user_pid_parm)
+        return STATUS_INVALID_CID;
+
+    //
+    // security check, target must be a sandboxed process
+    //
+
+    proc2 = Process_Find(user_pid_parm, NULL);
+    if (! proc2)
+        return STATUS_ACCESS_DENIED;
+
+    //
+    // open process, obtain handle and terminate
+    //
+
+    status = PsLookupProcessByProcessId(user_pid_parm, &ProcessObject);
+
+    if (NT_SUCCESS(status)) {
+
+        status = ObOpenObjectByPointer(ProcessObject, OBJ_KERNEL_HANDLE, NULL, PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | PROCESS_SET_INFORMATION, NULL, KernelMode, &handle);
+        ObDereferenceObject(ProcessObject);
+
+        if (NT_SUCCESS(status)) {
+
+            //
+            // Check and if needed clear critical process flag
+            //
+
+            ULONG breakOnTermination;
+            status = ZwQueryInformationProcess(handle, ProcessBreakOnTermination, &breakOnTermination, sizeof(ULONG), NULL);
+            if (NT_SUCCESS(status) && breakOnTermination) {
+                breakOnTermination = 0;
+                status = ZwSetInformationProcess(handle, ProcessBreakOnTermination, &breakOnTermination, sizeof(ULONG));
+            }
+
+            //
+            // Terminate
+            //
+
+            if (NT_SUCCESS(status))
+                ZwTerminateProcess(handle, DBG_TERMINATE_PROCESS);
+            ZwClose(handle);
+        }
+    }
 
     return status;
 }

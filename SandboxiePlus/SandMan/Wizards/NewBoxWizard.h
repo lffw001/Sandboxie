@@ -10,12 +10,14 @@ class QLineEdit;
 class QRadioButton;
 QT_END_NAMESPACE
 
+//#define USE_COMBO
+
 class CNewBoxWizard : public QWizard
 {
     Q_OBJECT
 
 public:
-    enum { Page_Type, Page_Files, Page_Advanced, Page_Summary };
+    enum { Page_Type, Page_Files, Page_Isolation, Page_Advanced, Page_Summary };
 
     CNewBoxWizard(bool bAlowTemp, QWidget *parent = nullptr);
 
@@ -40,26 +42,41 @@ protected:
 // CBoxTypePage
 // 
 
+//#define USE_COMBO
+
 class CBoxTypePage : public QWizardPage
 {
     Q_OBJECT
 
+    Q_PROPERTY(int currentType READ currentType WRITE setCurrentType NOTIFY typeChanged USER true)
+
 public:
     CBoxTypePage(bool bAlowTemp, QWidget *parent = nullptr);
+
+    void initializePage() override;
 
     int nextId() const override;
     bool isComplete() const override;
     bool validatePage() override;
+
+    void setCurrentType(int type);
+    int currentType();
+
+signals:
+    void typeChanged();
 
 private slots:
     void OnBoxTypChanged();
     void OnAdvanced();
 
 private:
-    QComboBox*  m_pBoxType;
-    QLabel*     m_pInfoLabel;
-    QLineEdit*  m_pBoxName;
-    QCheckBox*  m_pAdvanced;
+#ifdef USE_COMBO
+    QComboBox*      m_pBoxType;
+    QLabel*         m_pInfoLabel;
+#endif
+    QLineEdit*      m_pBoxName;
+    QButtonGroup*   m_TypeGroup;
+    QCheckBox*      m_pAdvanced;
 
     bool m_bInstant;
 };
@@ -86,6 +103,34 @@ private:
 
 
 //////////////////////////////////////////////////////////////////////////////////////////
+// CIsolationPage
+// 
+
+class CIsolationPage : public QWizardPage
+{
+    Q_OBJECT
+
+public:
+    CIsolationPage(QWidget *parent = nullptr);
+
+    int nextId() const override;
+    void initializePage() override;
+    bool validatePage() override;
+    void OnDropAdminChanged(int state);
+
+private slots:
+    void OnBlockNetworkChanged(int index);
+
+private:
+    QCheckBox* m_pShareAccess;
+    QCheckBox* m_pMSIServer;
+    QCheckBox* m_pDropAdmin;
+    QCheckBox* m_pBoxToken;
+    QCheckBox* m_pPromptAccess;
+};
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
 // CAdvancedPage
 // 
 
@@ -100,9 +145,12 @@ public:
     void initializePage() override;
     bool validatePage() override;
 
+private slots:
+    void OnSharedTemplateIndexChanged(int index);
+
 private:
-    QCheckBox* m_pShareAccess;
-    QCheckBox* m_pMSIServer;
+    QComboBox* m_pSharedTemplate;
+    QComboBox* m_pSharedTemplateIndex;
 };
 
 

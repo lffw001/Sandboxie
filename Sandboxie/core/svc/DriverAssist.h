@@ -91,7 +91,7 @@ private:
     // mounted registry hive
     //
 
-    void MountedHive(void *_msg);
+    void HiveMounted(void *_msg);
 
     //
     // unmount registry hive
@@ -103,7 +103,7 @@ private:
     // log messages to file
     //
 
-    void LogMessage();
+    void LogMessage(void *_msg);
 
     void LogMessage_Single(ULONG code, wchar_t* data, ULONG pid);
     void LogMessage_Multi(ULONG msgid, const WCHAR *path, const WCHAR *text);
@@ -121,6 +121,8 @@ private:
     //
     // SbieLogin
     //
+
+    void InitSIDs();
 
     bool GetSandboxieSID(const WCHAR* boxname, UCHAR* SandboxieLogonSid, DWORD dwSidSize);
 

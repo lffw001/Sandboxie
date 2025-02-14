@@ -1,7 +1,7 @@
 #----------------------------------------------------------------------------
 # SbieDrv
 #
-# Initialization errors issued to to the System event Log
+# Initialization errors issued to the System event Log
 #----------------------------------------------------------------------------
 
 1101;evt;inf;01
@@ -98,6 +98,14 @@ SBIE1152 Trampoline allocation failed %2
 SBIE1153 Sandboxie initialization failed.  Close all programs and then re-install Sandboxie  OR  restart your computer.
 .
 
+1205;evt;pop;err;01
+SBIE1205 Invalid DynData found in registry, error: %2
+.
+
+1206;evt;pop;err;01
+SBIE1206 Your Windows build (%2) is not yet supported by sandboxie, error: %3
+.
+
 #----------------------------------------------------------------------------
 # SbieDrv
 #
@@ -118,6 +126,10 @@ SBIE1203 Cannot build path list (error in %2)
 
 1204;pop;err;01
 SBIE1204 Sandbox creation failed for %3 %2
+.
+
+1207;pop;err;01
+SBIE1207 Your Windows build (%2) is not yet supported by Sandboxie, which means applications will run without security isolation!
 .
 
 1211;pop;err;01
@@ -262,6 +274,10 @@ SBIE1319 Blocked spooler print to file, %2 %3
 SBIE1320 To allow print spooler to write outside the sandbox for this process, please double-click on this message line
 .
 
+1321;pop;inf;01
+SBIE1321 Program '%2' was forced into sandbox %3
+.
+
 1399;pop;inf;01
 %0
 .
@@ -386,6 +402,14 @@ SBIE2114 File is too large to copy into sandbox, denying access - %2
 SBIE2115 File is too large to copy into sandbox, opening in read only - %2
 .
 
+2180;pop;inf;01
+SBIE2180 LowLevel.dll error %2
+.
+
+2181;pop;inf;01
+SBIE2181 LowLevel.dll detour failed to load SbieDll.dll into target process.
+.
+
 # %2 = Mozilla Firefox
 2191;pop;inf;01
 SBIE2191 %2 should not be updated while running under Sandboxie.
@@ -400,7 +424,7 @@ SBIE2193 Make sure to delete the sandbox after completing the update process.
 .
 
 2194;pop;inf;01
-SBIE2194 MSI installer requires %2 option to be set in the ini, what however weakens the isolation.
+SBIE2194 MSI installer requires %2 option to be set in the ini to be able to work correctly, however this option weakens the isolation.
 .
 
 2195;pop;inf;01
@@ -534,6 +558,72 @@ SBIE2227 '%2' is located on a volume which does not support 8.3 naming. This can
 .
 
 #----------------------------------------------------------------------------
+
+2230;pop;wrn;01
+SBIE2230 Failed to mount root for %2
+.
+
+2231;pop;wrn;01
+SBIE2231 Junction Target mismatch %2
+.
+
+2232;pop;wrn;01
+SBIE2232 The ImDisk Driver is not loaded
+.
+
+2233;pop;wrn;01
+SBIE2233 Cannot control the ImDisk Driver: %2
+.
+
+2234;pop;wrn;01
+SBIE2234 No free Drive letter found for temporary mount
+.
+
+2235;pop;wrn;01
+SBIE2235 Error undefining temporary drive letter: "%2"
+.
+
+2236;pop;wrn;01
+SBIE2236 %2 could not be invoked (perhaps it is not installed?)
+.
+
+2237;pop;wrn;01
+SBIE2237 Failed to unmount root %2
+.
+
+2238;pop;wrn;01
+SBIE2238 Ram Disk size is not configured, or to small, set RamDiskSizeKb=1048576 (1GB in Kilobytes) in the [GlobalSettings] ini section.
+.
+
+2239;pop;wrn;01
+SBIE2239 The root folder of sandbox %2 must be empty in order to mount a volume to it.
+.
+
+2240;pop;wrn;01
+SBIE2240 Timeout when trying to mount ImDisk volume %2
+.
+
+2241;pop;wrn;01
+SBIE2241 Box image file %2 could not be opened
+.
+
+2242;pop;wrn;01
+SBIE2242 Failed to mount box image, The specified cipher is not supported
+.
+
+2243;pop;wrn;01
+SBIE2243 Failed to mount box image, Wrong password
+.
+
+2244;pop;wrn;01
+SBIE2244 Failed to mount box image, Password required
+.
+
+2246;pop;wrn;01
+SBIE2246 Failed to mount box image, ImBox error %2
+.
+
+#----------------------------------------------------------------------------
 # SbieDrv
 #
 # Messages from user mode -- error -- 2301 through 2399
@@ -546,7 +636,6 @@ SBIE2301 %2
 2302;pop;err;01
 SBIE2302 Process image configuration conflict: %2
 .
-
 
 2303;pop;err;01
 SBIE2303 Could not hook %2
@@ -662,6 +751,10 @@ SBIE2332 Cannot access file SbiePst.dat
 
 2335;pop;err;01
 SBIE2335 Initialization failed for process %2
+.
+
+2360;pop;err;01
+SBIE2360 Failed to inject SOCKS5 proxy:  %2
 .
 
 2336;pop;err;01
@@ -827,6 +920,15 @@ Desktop
 # should match the localized folder name for Programs in the Start Menu folder
 3114;txt;01
 Programs
+.
+
+3198;txt;01
+Do you want to start a new program in the %2 sandbox?
+You received this message because you set AlertBeforeStart=y.
+.
+
+3199;txt;01
+This startup request does not appear to be invoked by the SANDBOXIE component. Are you sure you want to run it? If this is your action, you can ignore it and choose yes.
 .
 
 3202;txt;01
@@ -1349,6 +1451,10 @@ Upgrade to Sandboxie-Plus
 
 3468;txt;01
 Sandboxie-Plus Migration Guide
+.
+
+3469;txt;01
+What's new in Sandboxie-Plus
 .
 
 3471;txt;01
@@ -3599,9 +3705,17 @@ If you would prefer to use a UI to control these options, please upgrade to Sand
 .
 
 6007;txt;01
-Sandboxie Plus offers enhanced privacy protection by switching the old behavior from a black-list mode, i.e. allowing read access to the entire drive, except blocked by Closed Path or Write Path, to a white-list mode where sandboxed programs are only allowed to read generic system locations and read access to most user data must be first explicitly granted.
+Sandboxie Plus offers enhanced privacy protection by switching the old behavior from a black-list mode, i.e., allowing read access to the entire drive, except blocked by Closed Path or Write Path, to a white-list mode where sandboxed programs are only allowed to read generic system locations and read access to most user data must be first explicitly granted.
 
 The legacy UI of Sandboxie classic does not implement support for this mode of operation. Although it can be configured using the ini file, it is recommended to use the modern Sandboxie-Plus UI (SandMan.exe) if you want to use privacy enhanced boxes.
+.
+
+6008;pop;err;01
+The configuration %3 of box %2 requires a supporter certificate and can not be used without it.
+.
+
+6009;pop;err;01
+The configuration %3 of box %2 requires an advanced supporter certificate.
 .
 
 6010;txt;01
@@ -3923,7 +4037,6 @@ The certificate is not valid.
 The certificate is valid and has been successfully applied.
 .
 
-
 #----------------------------------------------------------------------------
 # SandboxieInstall
 #----------------------------------------------------------------------------
@@ -4097,7 +4210,7 @@ Select NO to delete the Sandboxie.ini file and lose your configuration settings.
 .
 
 8055;ins;01
-There is an online update of the Templates.ini and/or the translations for this version of sandboxie available, do you want to install it?
+There is an online update of the Templates.ini and/or the translations for this version of Sandboxie available, do you want to install it?
 .
 
 #----------------------------------------------------------------------------

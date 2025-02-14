@@ -147,7 +147,7 @@ typedef struct _FLT_RELATED_OBJECTS {
 typedef CONST struct _FLT_RELATED_OBJECTS *PCFLT_RELATED_OBJECTS;
 
 
-#if !defined(_AMD64_) && !defined(_IA64_)
+#if !defined(_AMD64_) && !defined(_IA64_) && !defined(_ARM_) && !defined(_ARM64_)
 #include "pshpack4.h"
 #endif
 
@@ -351,7 +351,7 @@ typedef union _FLT_PARAMETERS {
 
             //
             //  Type3InputBuffer: name changed from IO_STACK_LOCATION parameters
-            //  Note for this mothod, both input & output buffers are 'raw',
+            //  Note for this method, both input & output buffers are 'raw',
             //  i.e. unbuffered, and should be treated with caution ( either
             //  probed & captured before access, or use try-except to enclose
             //  access to the buffer)
@@ -451,7 +451,7 @@ typedef union _FLT_PARAMETERS {
 
             //
             //  Type3InputBuffer: name changed from IO_STACK_LOCATION parameters
-            //  Note for this mothod, both input & output buffers are 'raw',
+            //  Note for this method, both input & output buffers are 'raw',
             //  i.e. unbuffered, and should be treated with caution ( either
             //  probed & captured before access, or use try-except to enclose
             //  access to the buffer)
@@ -799,7 +799,7 @@ typedef union _FLT_PARAMETERS {
 } FLT_PARAMETERS, *PFLT_PARAMETERS;
 
 
-#if !defined(_AMD64_) && !defined(_IA64_)
+#if !defined(_AMD64_) && !defined(_IA64_) && !defined(_ARM_) && !defined(_ARM64_)
 #include "poppack.h"
 #endif
 

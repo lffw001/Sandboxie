@@ -120,7 +120,7 @@ static NTSTATUS Conf_Merge_Global(
 
 static NTSTATUS Conf_Merge_Template(
     CONF_DATA *data, ULONG session_id,
-    const WCHAR *tmpl_name, CONF_SECTION *section);
+    const WCHAR *tmpl_name, CONF_SECTION *section, const WCHAR* name);
 
 static const WCHAR *Conf_Get_Helper(
     const WCHAR *section_name, const WCHAR *setting_name,
@@ -427,6 +427,12 @@ _FX NTSTATUS Conf_Read(ULONG session_id)
                 MSG_CONF_READ, 0, status, linenum_str, session_id);
         }
     }
+
+    //
+    // cache some config
+    //
+
+    Log_LogMessageEvents = Conf_Get_Boolean(NULL, L"LogMessageEvents", 0, FALSE);
 
     return status;
 }
@@ -866,7 +872,7 @@ _FX NTSTATUS Conf_Merge_Templates(CONF_DATA *data, ULONG session_id)
             //
 
             status = Conf_Merge_Template(
-                data, session_id, setting->value, sandbox);
+                data, session_id, setting->value, sandbox, NULL);
 
             if (! NT_SUCCESS(status))
                 return status;
@@ -955,7 +961,7 @@ _FX NTSTATUS Conf_Merge_Global(
             //
 
             status = Conf_Merge_Template(
-                data, session_id, setting->value, sandbox);
+                data, session_id, setting->value, sandbox, L"GlobalSettings");
 
             if (! NT_SUCCESS(status))
                 return status;
@@ -985,7 +991,7 @@ _FX NTSTATUS Conf_Merge_Global(
 
 _FX NTSTATUS Conf_Merge_Template(
     CONF_DATA *data, ULONG session_id,
-    const WCHAR *tmpl_name, CONF_SECTION *section)
+    const WCHAR *tmpl_name, CONF_SECTION *section, const WCHAR* name)
 {
     CONF_SECTION *tmpl = NULL;
 
@@ -1013,10 +1019,10 @@ _FX NTSTATUS Conf_Merge_Template(
             }
 
             nset = Mem_Alloc(data->pool, sizeof(CONF_SETTING));
-            nset->from_template = TRUE;
-            nset->template_handled = FALSE;
             if (! nset)
                 return STATUS_INSUFFICIENT_RESOURCES;
+            nset->from_template = TRUE;
+            nset->template_handled = FALSE;
             nset->name = Mem_AllocString(data->pool, oset->name);
             if (! nset->name)
                 return STATUS_INSUFFICIENT_RESOURCES;
@@ -1036,7 +1042,7 @@ _FX NTSTATUS Conf_Merge_Template(
     } else {
 
         Log_Msg_Session(MSG_CONF_MISSING_TMPL,
-                        section->name, tmpl_name, session_id);
+                        name ? name : section->name, tmpl_name, session_id);
     }
 
     return STATUS_SUCCESS;
@@ -1508,7 +1514,7 @@ _FX NTSTATUS Conf_Api_Reload(PROCESS *proc, ULONG64 *parms)
         /*
 #ifdef HOOK_WIN32K
         // must be windows 10 or later
-        if (Driver_OsBuild >= 10041) {
+        if (Driver_OsBuild >= 14393) {
             extern ULONG Syscall_MaxIndex32;
             if (Conf_Get_Boolean(NULL, L"EnableWin32kHooks", 0, FALSE) && Syscall_MaxIndex32 == 0) {
                 if(Syscall_Init_List32()){

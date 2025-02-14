@@ -80,12 +80,12 @@ static ULONG Key_IsDeletedEx_v2(const WCHAR* TruePath, const WCHAR* ValueName, B
 //
 
 VOID File_ClearPathBranche_internal(LIST* parent);
-VOID File_SavePathTree_internal(LIST* Root, const WCHAR* name);
-BOOLEAN File_LoadPathTree_internal(LIST* Root, const WCHAR* name);
-VOID File_SetPathFlags_internal(LIST* Root, const WCHAR* Path, ULONG setFlags, ULONG clrFlags, const WCHAR* Relocation);
+BOOLEAN File_OpenDataFile(const WCHAR* name, HANDLE* hPathsFile, BOOLEAN Append);
+VOID File_AppendPathEntry_internal(HANDLE hPathsFile, const WCHAR* Path, ULONG SetFlags, const WCHAR* Relocation, WCHAR* (*TranslatePath)(const WCHAR*));
+VOID File_SavePathTree_internal(LIST* Root, const WCHAR* name, WCHAR* (*TranslatePath)(const WCHAR *));
+BOOLEAN File_LoadPathTree_internal(LIST* Root, const WCHAR* name, WCHAR* (*TranslatePath)(const WCHAR *));
 ULONG File_GetPathFlags_internal(LIST* Root, const WCHAR* Path, WCHAR** pRelocation, BOOLEAN CheckChildren);
-VOID File_SavePathNode_internal(HANDLE hPathsFile, LIST* parent, WCHAR* Path, ULONG Length, ULONG SetFlags);
-BOOLEAN File_MarkDeleted_internal(LIST* Root, const WCHAR* Path);
+BOOLEAN File_MarkDeleted_internal(LIST* Root, const WCHAR* Path, BOOLEAN* pTruncated);
 VOID File_SetRelocation_internal(LIST* Root, const WCHAR* OldTruePath, const WCHAR* NewTruePath);
 
 BOOL File_InitBoxRootWatcher();
@@ -128,7 +128,7 @@ _FX BOOLEAN Key_SavePathTree()
 {
     EnterCriticalSection(Key_PathRoot_CritSec);
 
-    File_SavePathTree_internal(&Key_PathRoot, KEY_PATH_FILE_NAME);
+    File_SavePathTree_internal(&Key_PathRoot, KEY_PATH_FILE_NAME, NULL);
 
     File_GetAttributes_internal(KEY_PATH_FILE_NAME, &Key_PathsFileSize, &Key_PathsFileDate, NULL);
 
@@ -151,7 +151,7 @@ _FX BOOLEAN Key_LoadPathTree()
 
     EnterCriticalSection(Key_PathRoot_CritSec);
 
-    Key_RegPaths_Loaded = File_LoadPathTree_internal(&Key_PathRoot, KEY_PATH_FILE_NAME);
+    Key_RegPaths_Loaded = File_LoadPathTree_internal(&Key_PathRoot, KEY_PATH_FILE_NAME, NULL);
 
     LeaveCriticalSection(Key_PathRoot_CritSec);
     
@@ -242,11 +242,38 @@ _FX NTSTATUS Key_MarkDeletedEx_v2(const WCHAR* TruePath, const WCHAR* ValueName)
 
     EnterCriticalSection(Key_PathRoot_CritSec);
 
-    BOOLEAN bSet = File_MarkDeleted_internal(&Key_PathRoot, FullPath);
+    BOOLEAN bTruncated = FALSE;
+    BOOLEAN bSet = File_MarkDeleted_internal(&Key_PathRoot, FullPath, &bTruncated);
 
     LeaveCriticalSection(Key_PathRoot_CritSec);
 
-    if (bSet) Key_SavePathTree();
+    if (bSet) 
+    {
+        //
+        // Optimization: When marking a lot of host keys as deleted, only append single line entries if possible instead of re creating the entire file
+        //
+
+        ULONG64 PathsFileSize = 0;
+        ULONG64 PathsFileDate = 0;
+        if (!bTruncated 
+            && File_GetAttributes_internal(KEY_PATH_FILE_NAME, &PathsFileSize, &PathsFileDate, NULL)
+            && (Key_PathsFileSize == PathsFileSize && Key_PathsFileDate == PathsFileDate)) {
+
+            HANDLE hPathsFile;
+            if (File_OpenDataFile(KEY_PATH_FILE_NAME, &hPathsFile, TRUE))
+            {
+                File_AppendPathEntry_internal(hPathsFile, FullPath, KEY_DELETED_FLAG, NULL, NULL);
+
+                NtClose(hPathsFile);
+
+                Key_PathsVersion++;
+
+                File_GetAttributes_internal(KEY_PATH_FILE_NAME, &Key_PathsFileSize, &Key_PathsFileDate, NULL);
+            }
+        }
+        else
+            Key_SavePathTree();
+    }
 
     File_ReleaseMutex(hMutex);
 

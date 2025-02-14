@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2023 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -48,9 +48,10 @@ extern __declspec(dllexport) int __CRTDECL Sbie_snprintf(char *_Buffer, size_t C
 #define TRUE_NAME_BUFFER        0
 #define COPY_NAME_BUFFER        1
 #define TMPL_NAME_BUFFER        2
-#define MISC_NAME_BUFFER        3 // 4, 5, 6, 7
-#define NAME_BUFFER_COUNT       8
-#define NAME_BUFFER_DEPTH       16 // 12
+#define NORM_NAME_BUFFER        3
+#define MISC_NAME_BUFFER        4 // 5 - 11
+#define NAME_BUFFER_COUNT       12
+#define NAME_BUFFER_DEPTH       16
 
 
 #ifdef _WIN64
@@ -109,7 +110,7 @@ enum {
     DLL_IMAGE_ACROBAT_READER,
     DLL_IMAGE_OFFICE_OUTLOOK,
     DLL_IMAGE_OFFICE_EXCEL,
-    DLL_IMAGE_FLASH_PLAYER_SANDBOX,
+    DLL_IMAGE_FLASH_PLAYER_SANDBOX, // obsolete
     DLL_IMAGE_PLUGIN_CONTAINER,
     DLL_IMAGE_OTHER_WEB_BROWSER,
     DLL_IMAGE_OTHER_MAIL_CLIENT,
@@ -199,6 +200,7 @@ typedef struct _THREAD_DATA {
     BOOLEAN         proc_create_process_capture_image;
     BOOLEAN         proc_create_process_force_elevate;
     BOOLEAN         proc_create_process_as_invoker;
+    BOOLEAN         proc_create_process_fake_admin;
     BOOLEAN         proc_image_is_copy;
     WCHAR          *proc_image_path;
     WCHAR          *proc_command_line;
@@ -265,10 +267,14 @@ extern const WCHAR *Dll_HomeDosPath;
 //extern ULONG Dll_HomeDosPathLen;
 
 extern const WCHAR *Dll_BoxFilePath;
+extern const WCHAR *Dll_BoxFileRawPath; // not reparsed nt path
+extern const WCHAR *Dll_BoxFileDosPath;
 extern const WCHAR *Dll_BoxKeyPath;
 extern const WCHAR *Dll_BoxIpcPath;
 
 extern ULONG Dll_BoxFilePathLen;
+extern ULONG Dll_BoxFileRawPathLen;
+extern ULONG Dll_BoxFileDosPathLen;
 extern ULONG Dll_BoxKeyPathLen;
 extern ULONG Dll_BoxIpcPathLen;
 extern ULONG Dll_SidStringLen;
@@ -276,15 +282,16 @@ extern ULONG Dll_SidStringLen;
 extern ULONG Dll_ProcessId;
 extern ULONG Dll_SessionId;
 
+extern ULONG Dll_DriverFlags;
 extern ULONG64 Dll_ProcessFlags;
 
 #ifndef _WIN64
 extern BOOLEAN Dll_IsWow64;
 #endif
-#ifdef _M_X64
+#ifdef _M_ARM64EC
 extern BOOLEAN Dll_IsArm64ec;
 #endif
-#ifndef _M_ARM64
+#ifndef _WIN64
 extern BOOLEAN Dll_IsXtAjit;
 #endif
 extern BOOLEAN Dll_IsSystemSid;
@@ -305,6 +312,10 @@ extern ULONG Dll_Windows;
 extern PSECURITY_DESCRIPTOR Secure_NormalSD;
 extern PSECURITY_DESCRIPTOR Secure_EveryoneSD;
 
+extern BOOLEAN Secure_CopyACLs;
+
+extern BOOLEAN Secure_FakeAdmin;
+
 extern BOOLEAN Ldr_BoxedImage;
 
 extern WCHAR *Ldr_ImageTruePath;
@@ -314,6 +325,8 @@ extern BOOLEAN Ipc_OpenCOM;
 extern const WCHAR *Scm_CryptSvc;
 
 extern BOOLEAN Dll_SbieTrace;
+extern BOOLEAN Dll_ApiTrace;
+extern BOOLEAN Dll_FileTrace;
 
 
 //---------------------------------------------------------------------------
@@ -394,19 +407,6 @@ void SbieDll_GetReadablePaths(WCHAR path_code, LIST **lists);
 void SbieDll_ReleaseFilePathLock();
 
 BOOLEAN SbieDll_HasReadableSubPath(WCHAR path_code, const WCHAR* TruePath);
-
-#define PATH_OPEN_FLAG      0x10
-#define PATH_CLOSED_FLAG    0x20
-#define PATH_WRITE_FLAG     0x40
-
-#define PATH_IS_OPEN(f)     (((f) & PATH_OPEN_FLAG) != 0)
-#define PATH_NOT_OPEN(f)    (((f) & PATH_OPEN_FLAG) == 0)
-
-#define PATH_IS_CLOSED(f)   (((f) & PATH_CLOSED_FLAG) != 0)
-#define PATH_NOT_CLOSED(f)  (((f) & PATH_CLOSED_FLAG) == 0)
-
-#define PATH_IS_WRITE(f)    (((f) & PATH_WRITE_FLAG) != 0)
-#define PATH_NOT_WRITE(f)   (((f) & PATH_WRITE_FLAG) == 0)
 
 
 //---------------------------------------------------------------------------
@@ -506,7 +506,7 @@ BOOLEAN File_IsBlockedNetParam(const WCHAR *BoxName);
 
 void File_GetSetDeviceMap(WCHAR *DeviceMap96);
 
-void File_NotifyRecover(HANDLE FileHandle);
+void File_NotifyRecover(HANDLE FileHandle, void* CloseParams);
 
 //---------------------------------------------------------------------------
 // Functions (key)
@@ -520,7 +520,7 @@ NTSTATUS Key_MarkDeletedAndClose(HANDLE KeyHandle);
 
 void Key_DiscardMergeByPath(const WCHAR *TruePath, BOOLEAN Recurse);
 
-void Key_NtClose(HANDLE KeyHandle);
+void Key_NtClose(HANDLE KeyHandle, void* CloseParams);
 
 HANDLE Key_GetTrueHandle(HANDLE KeyHandle, BOOLEAN *pIsOpenPath);
 
@@ -561,9 +561,7 @@ BOOLEAN Sxs_FileCallback(const WCHAR *path, HANDLE *out_handle);
 HANDLE Scm_OpenKeyForService(
     const WCHAR *ServiceName, BOOLEAN ForWrite);
 
-BOOLEAN Scm_SecHostDll(HMODULE);
-
-void Scm_SecHostDll_W8(void);
+BOOLEAN SecHost_Init(HMODULE);
 
 
 //---------------------------------------------------------------------------
@@ -605,6 +603,8 @@ ULONG_PTR ProtectCall3(
 ULONG_PTR ProtectCall4(
     void *CallAddress,
     ULONG_PTR Arg1, ULONG_PTR Arg2, ULONG_PTR Arg3, ULONG_PTR Arg4);
+
+BOOL SH32_BreakoutDocument(const WCHAR* path, ULONG len);
 
 BOOL SH32_DoRunAs(
     const WCHAR *CmdLine, const WCHAR *WorkDir,
@@ -687,7 +687,7 @@ BOOLEAN Scm_Init_AdvApi(HMODULE);
 
 BOOLEAN Proc_Init_AdvApi(HMODULE);
 
-BOOLEAN Cred_Init_AdvApi(HMODULE);
+BOOLEAN Cred_Init(HMODULE);
 
 //BOOLEAN Lsa_Init_AdvApi(HMODULE module);
 
@@ -726,6 +726,8 @@ BOOLEAN SH32_Init(HMODULE);
 BOOLEAN SH32_Init_ZipFldr(HMODULE);
 
 BOOLEAN SH32_Init_UxTheme(HMODULE);
+
+BOOLEAN Kernel_Init();
 
 BOOLEAN Gui_Init(HMODULE);
 
@@ -795,6 +797,10 @@ BOOLEAN Pdh_Init(HMODULE hmodule);
 
 BOOLEAN NsiRpc_Init(HMODULE);
 
+//BOOLEAN Wininet_Init(HMODULE);
+
+BOOLEAN Nsi_Init(HMODULE);
+
 BOOLEAN Ntmarta_Init(HMODULE);
 
 BOOLEAN Acscmonitor_Init(HMODULE);
@@ -803,6 +809,7 @@ BOOLEAN DigitalGuardian_Init(HMODULE);
 
 BOOLEAN ComDlg32_Init(HMODULE);
 
+DWORD Dll_rand(void);
 
 //---------------------------------------------------------------------------
 // Functions (Config)

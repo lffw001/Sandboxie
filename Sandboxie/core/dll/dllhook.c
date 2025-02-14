@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020-2022 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -64,7 +64,16 @@ typedef struct _VECTOR_TABLE {
 #define VTABLE_SIZE 0x4000 //16k enough for 2048 8 byte entries
 
 #endif _WIN64
+
 extern ULONG Dll_Windows;
+
+typedef struct _TRACE_ENTRY {
+
+  LIST_ELEM list_elem;
+
+  char* name;
+  UCHAR code[128];
+} TRACE_ENTRY;
 
 typedef struct _MODULE_HOOK {
 
@@ -78,10 +87,12 @@ typedef struct _MODULE_HOOK {
 #ifdef _WIN64
     LIST        vTables;
 #endif
+    LIST        trace;
 } MODULE_HOOK;
 
 LIST Dll_ModuleHooks;
 CRITICAL_SECTION  Dll_ModuleHooks_CritSec;
+BOOLEAN Dll_HookTrace = FALSE;
 
 #ifdef _M_ARM64EC
 P_NtAllocateVirtualMemoryEx __sys_NtAllocateVirtualMemoryEx = NULL;
@@ -100,6 +111,8 @@ _FX void SbieDll_HookInit()
 {
     InitializeCriticalSection(&Dll_ModuleHooks_CritSec);
     List_Init(&Dll_ModuleHooks);
+
+    Dll_HookTrace = SbieApi_QueryConfBool(NULL, L"HookTrace", FALSE);
 
 #ifdef _M_ARM64EC
     __sys_NtAllocateVirtualMemoryEx = (P_NtAllocateVirtualMemoryEx)GetProcAddress(Dll_Ntdll, "NtAllocateVirtualMemoryEx");
@@ -146,6 +159,7 @@ _FX MODULE_HOOK* SbieDll_GetModuleHookAndLock(HMODULE module, ULONG tag)
 #ifdef _WIN64
         List_Init(&mod_hook->vTables);
 #endif
+        List_Init(&mod_hook->trace);
         List_Insert_Before(&Dll_ModuleHooks, NULL, mod_hook); // insert first as we probably will use it often in the next few calls
     }
     if (!mod_hook->pool) {
@@ -269,15 +283,19 @@ _FX VECTOR_TABLE* SbieDll_GetHookTable(MODULE_HOOK* mod_hook, ULONG_PTR target, 
 
         if (ptrVTable && ptrVTable->offset) { // check if we have a vtable
 
-            diff = (ULONG_PTR) &((ULONG_PTR *)ptrVTable->offset)[ptrVTable->index];
-            diff = diff - target;
-            delta = diff;
-            delta < 0 ? delta *= -1 : delta;
+            // the table is not full
+            if (ptrVTable->index < ptrVTable->maxEntries) {
 
-            // is DetourFunc in the jump range
-            if (delta < maxDelta && ptrVTable->index <= ptrVTable->maxEntries) {
-                // found a good table, break and return it
-                break;
+                diff = (ULONG_PTR) & ((ULONG_PTR*)ptrVTable->offset)[ptrVTable->index];
+                diff = diff - target;
+                delta = diff;
+                delta < 0 ? delta *= -1 : delta;
+
+                // is DetourFunc in the jump range
+                if (delta < maxDelta && ptrVTable->index <= ptrVTable->maxEntries) {
+                    // found a good table, break and return it
+                    break;
+                }
             }
         }
         else { // fail and disable vtable if it could not be initialized
@@ -475,7 +493,7 @@ skip_e9_rewrite: ;
     // Get the module hook object and obtain lock on critical section
     //
 
-    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF);
+    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF); // 0xFF - executable
     if (!mod_hook) {
         SbieApi_Log(2303, _fmt1, SourceFuncName, 5);
         goto finish;
@@ -871,9 +889,9 @@ void* SbieDll_Hook_arm(
     //
 
 #ifdef _M_ARM64EC
-    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, (tzuk & 0xFFFFFF00) | 0xEC);
+    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, (tzuk & 0xFFFFFF00) | 0xEC); // 0xEC - executable ARM64 Emulation Compatible
 #else
-    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF);
+    MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF); // 0xFF - executable
 #endif
     if (!mod_hook) {
         SbieApi_Log(2303, _fmt1, SourceFuncName, 5);
@@ -1040,25 +1058,14 @@ void* SbieDll_Hook_arm(
 
     func = (UCHAR *)pbTarget;
 
-    RegionBase = &func[-8]; // -8 for hotpatch area if present
-    RegionSize = 24;
+    RegionBase = &func[0];
+    RegionSize = 16;
 
     if (!VirtualProtect(RegionBase, RegionSize, PAGE_EXECUTE_READWRITE, &prot)) {
-
-        //
-        // if that fails just start at the exact offset and try again
-        // without the hot patch area which we don't use anyways
-        //
-
-        RegionBase = &func[0];
-        RegionSize = 16;
-
-        if (!VirtualProtect(RegionBase, RegionSize, PAGE_EXECUTE_READWRITE, &prot)) {
-            ULONG err = GetLastError();
-            SbieApi_Log(2303, _fmt2, SourceFuncName, 33, err);
-            func = NULL;
-            goto finish;
-        }
+        ULONG err = GetLastError();
+        SbieApi_Log(2303, _fmt2, SourceFuncName, 33, err);
+        func = NULL;
+        goto finish;
     }
 
     //
@@ -1130,7 +1137,7 @@ void* SbieDll_Hook_arm(
     }
 
     //
-    // restore protection and fluch instruction cache
+    // restore protection and flush instruction cache
     //
 
 	VirtualProtect(RegionBase, RegionSize, prot, &dummy_prot);
@@ -1149,33 +1156,32 @@ finish:
 
 
 //---------------------------------------------------------------------------
-// SbieDll_Hook
+// SbieDll_HookFunc
 //---------------------------------------------------------------------------
 
+#define HOOK_STAT_CHROME        0x00000001
+#define HOOK_STAT_NO_FFS        0x00000002
+#define HOOK_STAT_SKIPPED       0x00000004
+#define HOOK_STAT_TRACE         0x00000100
+#define HOOK_STAT_SYSCALL       0x00000200 // ARM64 EC only
+#define HOOK_STAT_INTERESTING   0x000000FF
 
-_FX void *SbieDll_Hook(
-    const char *SourceFuncName, void *SourceFunc, void *DetourFunc, HMODULE module)
+_FX void *SbieDll_HookFunc(
+    const char *SourceFuncName, void *SourceFunc, void *DetourFunc, HMODULE module, DWORD* pHookStats)
 {
-    if (SbieDll_FuncSkipHook(SourceFuncName))
-        return SourceFunc;
-
-    //if (Dll_SbieTrace) {
-    //    WCHAR* ModuleName = Trace_FindModuleByAddress((void*)module);
-    //    DbgPrint("Hooking: %S!%s\r\n", ModuleName, SourceFuncName);
-    //}
-
     //
     // Chrome sandbox support
     //
 
-    //void* OldSourceFunc = SourceFunc;
+    void* OldSourceFunc = SourceFunc;
 
     SourceFunc = Hook_CheckChromeHook(SourceFunc);
 
-    //if (OldSourceFunc != SourceFunc) {
+    if (OldSourceFunc != SourceFunc) {
+		if (pHookStats) *pHookStats |= HOOK_STAT_CHROME;
     //    WCHAR* ModuleName = Trace_FindModuleByAddress((void*)module);
     //    DbgPrint("Found Chrome Hook on: %S!%s\r\n", ModuleName, SourceFuncName);
-    //}
+    }
     
 
 #ifdef _M_ARM64EC
@@ -1194,6 +1200,8 @@ _FX void *SbieDll_Hook(
     extern ULONG* SbieApi_SyscallPtr;
     if (module == Dll_Ntdll && *(USHORT*)&SourceFuncName[0] == 'tN' && SbieApi_SyscallPtr) {
 
+        if (pHookStats) *pHookStats |= HOOK_STAT_SYSCALL;
+
         USHORT index = Hook_GetSysCallIndex(SourceFunc);
         if (index != 0xFFFF) {
 
@@ -1211,21 +1219,17 @@ _FX void *SbieDll_Hook(
             SbieApi_Log(2303, _fmt2, SourceFuncName, 69, 1);
     }
     else
-
-    // 
-    // if module is -1 than we come from the api redirection in Scm_SecHostDll
-    // as there we hook with other x64 code we use the regular x86 hook routine
-    //
-
-    if (module != (HMODULE)-1) {
-
+    {
         void* SourceFuncEC = Hook_GetFFSTarget(SourceFunc);
         if (SourceFuncEC) {
-
+    
             return SbieDll_Hook_arm(SourceFuncName, SourceFuncEC, DetourFunc, module);
         }
         else
-            SbieApi_Log(2303, _fmt1, SourceFuncName, 69);
+        {
+
+            if (pHookStats) *pHookStats |= HOOK_STAT_NO_FFS;
+        }
     }
 
 #endif
@@ -1234,6 +1238,265 @@ _FX void *SbieDll_Hook(
 #else
     return SbieDll_Hook_x86(SourceFuncName, SourceFunc, DetourFunc, module);
 #endif
+}
+
+
+//---------------------------------------------------------------------------
+// SbieDll_Hook
+//---------------------------------------------------------------------------
+
+
+_FX void *SbieDll_Hook(
+    const char *SourceFuncName, void *SourceFunc, void *DetourFunc, HMODULE module)
+{
+    const WCHAR* ModuleName = NULL;
+    DWORD HookStats = 0;
+    void* func = NULL;
+
+    if (SbieDll_FuncSkipHook(SourceFuncName)) {
+        HookStats = HOOK_STAT_SKIPPED;
+        func = SourceFunc;
+        goto finish;
+    }
+
+    //
+    // when hooking a function we can detour the detour and log the call
+    //
+
+    PDWORD64 pDetourFunc = NULL;
+    if (Dll_ApiTrace) {
+
+        if(!DetourFunc)
+			HookStats |= HOOK_STAT_TRACE;
+
+        ModuleName = Trace_FindModuleByAddress((void*)module);
+
+#ifdef _M_ARM64EC
+        MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, (tzuk & 0xFFFFFF00) | 0xEC); // 0xEC - executable ARM64 Emulation Compatible
+#else
+        MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF); // 0xFF - executable
+#endif
+
+        TRACE_ENTRY* pTrace = Pool_Alloc(mod_hook->pool, sizeof(TRACE_ENTRY));
+        List_Insert_After(&mod_hook->trace, NULL, pTrace);
+
+        UCHAR* NewDetour = pTrace->code;
+
+        extern void ApiInstrumentationAsm(void);
+
+        typedef union
+        {
+	        PBYTE pB;
+	        PWORD  pW;
+	        PDWORD pL;
+	        PDWORD64 pQ;
+        } TYPES;
+
+        TYPES ip;
+        ip.pB = NewDetour;
+
+        // store detour address
+        if (DetourFunc == NULL)
+            pDetourFunc = ip.pQ++;
+        else
+            *ip.pQ++ = (ULONG_PTR)DetourFunc;
+
+        // store full function name
+        int len;
+        if (ModuleName) {
+            len = Sbie_snprintf(ip.pB, 96, "%S!%s", ModuleName, SourceFuncName);
+            pTrace->name = ip.pB + wcslen(ModuleName) + 1;
+        } else {
+            len = Sbie_snprintf(ip.pB, 96, "%s", SourceFuncName);
+            pTrace->name = ip.pB + 1;
+        }
+        ip.pB += len + 1;
+        
+        ULONG_PTR tmp = ((ULONG_PTR)ip.pB & 0x03);
+        if (tmp != 0) // fix alignment, needed for ARM64
+            ip.pB += 0x4 - tmp;
+
+        // create new detour
+        DetourFunc = ip.pB;
+#if defined(_M_ARM64) || defined(_M_ARM64EC)
+        //*ip.pL++ = 0xD43E0000;  // brk #0xF000
+        //0
+        *ip.pL++ = 0x580000b1;	// ldr x17, 20 - NewDetour
+        *ip.pL++ = 0x58000050;	// ldr x16, 8 - ApiInstrumentationAsm
+        *ip.pL++ = 0xD61F0200;	// br x16
+        *ip.pQ++ = (ULONG_PTR)ApiInstrumentationAsm; 
+        *ip.pQ++ = (ULONG_PTR)NewDetour;
+        // 28
+        FlushInstructionCache(GetCurrentProcess(), pTrace->code, 32);
+#elif _WIN64
+        //*ip.pB++ = 0xCC;      // int 3
+        // 0
+        *ip.pW++ = 0xB848;    // mov rax, NewDetour     // move data header pointer to rax
+        *ip.pQ++ = (ULONG_PTR)NewDetour;
+        *ip.pW++ = 0x25FF;    // jmp qword ptr [rip+0]  // jump to proxy function
+        *ip.pL++ = 0x00000000;
+        *ip.pQ++ = (ULONG_PTR)ApiInstrumentationAsm;
+        // 24
+#else
+        //*ip.pB++ = 0xCC;      // int 3
+        // 0
+        *ip.pB++ = 0xB8;    // mov eax, NewDetour       // move data header pointer to eax
+        *ip.pL++ = (ULONG_PTR)NewDetour;
+        *ip.pB++ = 0xBA;    // mov edx, ApiInstrumentationAsm   // jump to proxy function
+        *ip.pL++ = (ULONG_PTR)ApiInstrumentationAsm;
+        *ip.pW++ = 0xE2FF;   // jmp edx
+        // 12
+#endif
+
+        LeaveCriticalSection(&Dll_ModuleHooks_CritSec);
+    }
+
+    //
+    // install the hook
+    //
+
+    func = SbieDll_HookFunc(SourceFuncName, SourceFunc, DetourFunc, module, &HookStats);
+
+    //
+    // when tracing API calls of functions that are not normally hooked,
+    // we did not have an initial detour and have passed NULL
+    // in this case we set the trampoline itself as final detour target
+    //
+
+    if (pDetourFunc) {
+        *pDetourFunc = (DWORD64)func;
+        func = NULL;
+    }
+
+finish:
+    if (Dll_HookTrace || (HookStats & HOOK_STAT_INTERESTING) || !func) {
+
+        if (!ModuleName)
+            ModuleName = Trace_FindModuleByAddress((void*)module);
+
+        WCHAR dbg[1024];
+		WCHAR* dbg_ptr = dbg;
+		size_t dbg_size = ARRAYSIZE(dbg);
+        int len = Sbie_snwprintf(dbg_ptr, dbg_size, L"%sHooking%s: %s!%S", 
+            !func ? L"FAILED " : (HookStats & HOOK_STAT_SKIPPED) ? L"Skipped " : L"", 
+            (HookStats & HOOK_STAT_TRACE) ? L" (trace)" : L"", 
+            ModuleName ? ModuleName : L"unknown", 
+            SourceFuncName);
+		dbg_ptr += len;
+		dbg_size -= len;
+        if (HookStats & HOOK_STAT_CHROME) {
+            len = Sbie_snwprintf(dbg_ptr, dbg_size, L" (Chrome Hooked)");
+            dbg_ptr += len;
+            dbg_size -= len;
+        }
+#ifdef _M_ARM64EC
+        if (HookStats & HOOK_STAT_NO_FFS) {
+            len = Sbie_snwprintf(dbg_ptr, dbg_size, L" FFS Target not found, hooked x86 code instead");
+            dbg_ptr += len;
+            dbg_size -= len;
+        }
+#endif
+		wcscat(dbg_ptr, L"\r\n");
+        SbieApi_MonitorPutMsg(MONITOR_HOOK | MONITOR_TRACE, dbg);
+    }
+
+    return func;
+}
+
+
+//---------------------------------------------------------------------------
+// SbieDll_IsTraced
+//---------------------------------------------------------------------------
+
+
+_FX BOOLEAN SbieDll_IsTraced(const char* name, MODULE_HOOK* mod_hook)
+{
+    TRACE_ENTRY* entry = List_Head(&mod_hook->trace);
+    while (entry) {
+
+        TRACE_ENTRY* next_entry = List_Next(entry);
+
+        if (strcmp(entry->name, name) == 0)
+            return TRUE;
+            
+        entry = next_entry;
+    }
+
+    return FALSE;
+}
+
+
+//---------------------------------------------------------------------------
+// SbieDll_TraceModule
+//---------------------------------------------------------------------------
+
+DWORD64 FindImagePosition(DWORD rva, void* pNTHeader, DWORD64 imageBase);
+
+_FX void SbieDll_TraceModule(HMODULE module)
+{
+    if (Dll_ApiTrace) {
+
+        //
+        // check if this dll should be fully hooked
+        //
+
+        const WCHAR* ModuleName = Trace_FindModuleByAddress((void*)module);
+        if (!SbieDll_CheckStringInList(ModuleName, NULL, L"ApiTraceDll"))
+            return;
+
+        //
+        // Check the mod_hook->trace list and add tracing to functions which has not yet been hooked
+        // 
+
+        MODULE_HOOK* mod_hook = SbieDll_GetModuleHookAndLock(module, tzuk | 0xFF); // 0xFF - executable
+
+        ULONG_PTR DllBase = (ULONG_PTR)module;
+
+#ifdef _WIN64
+        PIMAGE_NT_HEADERS64 nt_hdrs = ((IMAGE_NT_HEADERS64*)(DllBase + ((IMAGE_DOS_HEADER*)DllBase)->e_lfanew));
+        IMAGE_OPTIONAL_HEADER64* opt_hdr = &nt_hdrs->OptionalHeader;
+#else
+        PIMAGE_NT_HEADERS32 nt_hdrs = ((IMAGE_NT_HEADERS32*)(DllBase + ((IMAGE_DOS_HEADER*)DllBase)->e_lfanew));
+        IMAGE_OPTIONAL_HEADER32* opt_hdr = &nt_hdrs->OptionalHeader;
+#endif
+
+        if (opt_hdr->NumberOfRvaAndSizes) {
+
+            IMAGE_DATA_DIRECTORY* dir0 = &opt_hdr->DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+
+            if (dir0->VirtualAddress) {
+
+                DWORD64 dir0Address = FindImagePosition(dir0->VirtualAddress, nt_hdrs, DllBase);
+
+                IMAGE_EXPORT_DIRECTORY* exports = (IMAGE_EXPORT_DIRECTORY*)dir0Address;
+
+                ULONG* names = (ULONG*)((DWORD64)exports + exports->AddressOfNames - dir0->VirtualAddress);
+                USHORT* ordinals = (USHORT*)((DWORD64)exports + exports->AddressOfNameOrdinals - dir0->VirtualAddress);
+                ULONG* functions = (ULONG*)((DWORD64)exports + exports->AddressOfFunctions - dir0->VirtualAddress);
+
+                for (ULONG i = 0; i < exports->NumberOfNames; ++i) {
+
+                    char* name = (char*)((DWORD64)exports + names[i] - dir0->VirtualAddress);
+                    if (*name == '_' || *name == '?') continue;
+
+                    if (SbieDll_IsTraced(name, mod_hook))
+                        continue;
+
+                    if (SbieDll_CheckStringInListA(name, NULL, L"ApiSkipTrace"))
+                        continue;
+
+                    if (ordinals[i] < exports->NumberOfFunctions) {
+
+                        ULONG_PTR proc = DllBase + functions[ordinals[i]];
+
+                        SbieDll_Hook(name, (void*)proc, NULL, module);
+                    }
+                }
+            }
+        }
+
+        LeaveCriticalSection(&Dll_ModuleHooks_CritSec);
+    }
 }
 
 
@@ -1248,6 +1511,8 @@ _FX void SbieDll_UnHookModule(HMODULE module)
 
     MODULE_HOOK* mod_hook = List_Head(&Dll_ModuleHooks);
     while (mod_hook) {
+
+        MODULE_HOOK* next_mod_hook = List_Next(mod_hook);
 
         if (mod_hook->module == module) {
 
@@ -1267,10 +1532,13 @@ _FX void SbieDll_UnHookModule(HMODULE module)
             Pool_Delete(mod_hook->pool);
             Dll_Free(mod_hook);
 
+            // we may have more then one entry with different tags on ARM64
+#ifndef _M_ARM64EC
             break;
+#endif
         }
 
-        mod_hook = List_Next(mod_hook);
+        mod_hook = next_mod_hook;
     }
 
     LeaveCriticalSection(&Dll_ModuleHooks_CritSec);

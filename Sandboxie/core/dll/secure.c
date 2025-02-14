@@ -1,5 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
+ * Copyright 2020-2023 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -230,6 +231,8 @@ BOOLEAN Secure_ShouldFakeRunningAsAdmin = FALSE;
 BOOLEAN Secure_IsInternetExplorerTabProcess = FALSE;
 BOOLEAN Secure_Is_IE_NtQueryInformationToken = FALSE;
 
+BOOLEAN Secure_CopyACLs = FALSE;
+
 BOOLEAN Secure_FakeAdmin = FALSE;
 
 static UCHAR AdministratorsSid[16] = {
@@ -254,7 +257,20 @@ void Secure_InitSecurityDescriptors(void)
 
     PACL MyAcl;
     P_RtlAddMandatoryAce pRtlAddMandatoryAce;
-
+    
+    static UCHAR SystemLogonSid[12] = {
+	    1,                                      // Revision
+	    1,                                      // SubAuthorityCount
+	    0,0,0,0,0,5, // SECURITY_NT_AUTHORITY   // IdentifierAuthority
+	    SECURITY_LOCAL_SYSTEM_RID,0,0,0         // SubAuthority
+    };
+    static UCHAR AdministratorsSid[16] = {
+        1,                                      // Revision
+        2,                                      // SubAuthorityCount
+        0,0,0,0,0,5, // SECURITY_NT_AUTHORITY   // IdentifierAuthority
+        0x20, 0, 0, 0,                          // SubAuthority 1 - SECURITY_BUILTIN_DOMAIN_RID
+        0x20, 2, 0, 0                           // SubAuthority 2 - DOMAIN_ALIAS_RID_ADMINS
+    };
     static UCHAR AuthenticatedUsersSid[12] = {
         1,                                      // Revision
         1,                                      // SubAuthorityCount
@@ -302,8 +318,15 @@ void Secure_InitSecurityDescriptors(void)
     // build Normal Security Descriptor used for files, keys, etc
     //
 
-    MyAllocAndInitACL(MyAcl, 256);
-    MyAddAccessAllowedAce(MyAcl, &AuthenticatedUsersSid);
+    if (SbieApi_QueryConfBool(NULL, L"LockBoxToUser", FALSE)) {
+        MyAllocAndInitACL(MyAcl, 512);
+        MyAddAccessAllowedAce(MyAcl, &SystemLogonSid);
+        MyAddAccessAllowedAce(MyAcl, &AdministratorsSid);
+    }
+    else {
+        MyAllocAndInitACL(MyAcl, 256);
+        MyAddAccessAllowedAce(MyAcl, &AuthenticatedUsersSid);
+    }
 
     if (Dll_SidString) {
         UserSid = Dll_SidStringToSid(Dll_SidString);
@@ -357,6 +380,20 @@ void Secure_InitSecurityDescriptors(void)
 
 
 //---------------------------------------------------------------------------
+// SbieDll_GetPublicSD
+//---------------------------------------------------------------------------
+
+
+_FX PSECURITY_DESCRIPTOR SbieDll_GetPublicSD()
+{
+    if (!Secure_EveryoneSD)
+        Secure_InitSecurityDescriptors();
+
+    return Secure_EveryoneSD;
+}
+
+
+//---------------------------------------------------------------------------
 // Secure_Init
 //---------------------------------------------------------------------------
 
@@ -395,6 +432,8 @@ _FX BOOLEAN Secure_Init(void)
     void* RtlEqualSid = (P_RtlEqualSid)GetProcAddress(Dll_Ntdll, "RtlEqualSid");
 
     SBIEDLL_HOOK(Ldr_, RtlEqualSid);
+
+    Secure_CopyACLs = SbieApi_QueryConfBool(NULL, L"UseOriginalACLs", FALSE);
 
     //
     // install hooks to fake administrator privileges
@@ -719,7 +758,7 @@ _FX NTSTATUS Secure_NtDuplicateObject(
             //
 
             __sys_NtDuplicateObject(
-                SourceProcessHandle, SourceHandle, NULL, NULL,
+                SourceProcessHandle, SourceHandle, NULL, 0,
                 DesiredAccess, HandleAttributes, DUPLICATE_CLOSE_SOURCE);
         }
 
@@ -738,7 +777,7 @@ _FX NTSTATUS Secure_NtDuplicateObject(
             }
 
             if (SourceHandle)
-                Key_NtClose(SourceHandle);
+                Key_NtClose(SourceHandle, NULL);
         }
 
     //
@@ -988,8 +1027,9 @@ _FX NTSTATUS Ldr_NtQueryInformationToken(
     ULONG TokenInformationLength,
     ULONG *ReturnLength)
 {
+    THREAD_DATA *TlsData = Dll_GetTlsData(NULL);
+
     NTSTATUS status = 0;
-    THREAD_DATA *TlsData = NULL;
     HANDLE hTokenReal = NULL;
     BOOLEAN FakeAdmin = FALSE;
 
@@ -1004,7 +1044,7 @@ _FX NTSTATUS Ldr_NtQueryInformationToken(
     // we also ensure that the token belongs to the current process
     //
 
-    if (Secure_FakeAdmin && (SbieApi_QueryProcessInfoEx(0, 'ippt', (LONG_PTR)(hTokenReal ? hTokenReal : TokenHandle))))
+    if ((Secure_FakeAdmin || TlsData->proc_create_process_fake_admin) && (SbieApi_QueryProcessInfoEx(0, 'ippt', (LONG_PTR)(hTokenReal ? hTokenReal : TokenHandle))))
     {
         FakeAdmin = TRUE;
     }
@@ -1023,8 +1063,6 @@ _FX NTSTATUS Ldr_NtQueryInformationToken(
     // otherwise, this check is related to Protected Mode, so pretend
     // we are running as Administrator
     //
-
-    TlsData = Dll_GetTlsData(NULL);
 
     if (Secure_Is_IE_NtQueryInformationToken && !TlsData->proc_create_process)
     {
@@ -1135,10 +1173,12 @@ NTSTATUS Ldr_NtAccessCheckByType(PSECURITY_DESCRIPTOR SecurityDescriptor, PSID P
 
 _FX NTSTATUS Ldr_NtAccessCheck(PSECURITY_DESCRIPTOR SecurityDescriptor, HANDLE ClientToken, ACCESS_MASK DesiredAccess, PGENERIC_MAPPING GenericMapping, PPRIVILEGE_SET RequiredPrivilegesBuffer, PULONG BufferLength, PACCESS_MASK GrantedAccess, PNTSTATUS AccessStatus)
 {
+    THREAD_DATA *TlsData = Dll_GetTlsData(NULL);
+
     NTSTATUS status = 0;
     HANDLE hTokenReal = NULL;
 
-    if (Secure_FakeAdmin && SecurityDescriptor) {
+    if ((Secure_FakeAdmin || TlsData->proc_create_process_fake_admin) && SecurityDescriptor) {
         BOOLEAN Fake = FALSE;
 
         PSID Group, Owner;
@@ -1337,7 +1377,7 @@ _FX NTSTATUS Secure_RtlQueryElevationFlags(ULONG *Flags)
 
     BOOLEAN fake = FALSE;
 
-    if (Secure_FakeAdmin) 
+    if (Secure_FakeAdmin || TlsData->proc_create_process_fake_admin) 
     {
         fake = TRUE;
     } 
@@ -1431,7 +1471,9 @@ NTSTATUS Secure_RtlCheckTokenMembershipEx(
     DWORD flags,
     PUCHAR isMember)
 {
-    if (Secure_FakeAdmin && RtlEqualSid(sidToCheck, AdministratorsSid)) {
+    THREAD_DATA *TlsData = Dll_GetTlsData(NULL);
+
+    if ((Secure_FakeAdmin || TlsData->proc_create_process_fake_admin) && RtlEqualSid(sidToCheck, AdministratorsSid)) {
         if (isMember) *isMember = TRUE;
         return STATUS_SUCCESS;
     }

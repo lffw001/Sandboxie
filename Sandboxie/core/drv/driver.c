@@ -1,6 +1,6 @@
 /*
  * Copyright 2004-2020 Sandboxie Holdings, LLC 
- * Copyright 2020 David Xanatos, xanasoft.com
+ * Copyright 2020-2024 David Xanatos, xanasoft.com
  *
  * This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -45,6 +45,7 @@
 #include "util.h"
 #include "token.h"
 #include "wfp.h"
+#include "dyn_data.h"
 
 //---------------------------------------------------------------------------
 // Functions
@@ -63,6 +64,10 @@ static BOOLEAN Driver_FindHomePath(UNICODE_STRING *RegistryPath);
 
 static BOOLEAN Driver_FindMissingServices(void);
 
+#ifdef _M_ARM64
+static BOOLEAN Driver_FindKiServiceInternal(void);
+#endif
+
 static void SbieDrv_DriverUnload(DRIVER_OBJECT *DriverObject);
 
 
@@ -74,6 +79,9 @@ static void SbieDrv_DriverUnload(DRIVER_OBJECT *DriverObject);
 #pragma alloc_text (INIT, Driver_CheckOsVersion)
 #pragma alloc_text (INIT, Driver_FindHomePath)
 #pragma alloc_text (INIT, Driver_FindMissingServices)
+#ifdef _M_ARM64
+#pragma alloc_text (INIT, Driver_FindKiServiceInternal)
+#endif
 #endif // ALLOC_PRAGMA
 
 
@@ -94,6 +102,7 @@ WCHAR *Driver_Version = TEXT(MY_VERSION_STRING);
 
 ULONG Driver_OsVersion = 0;
 ULONG Driver_OsBuild = 0;
+BOOLEAN Driver_OsTestSigning = FALSE;
 
 POOL *Driver_Pool = NULL;
 
@@ -187,9 +196,13 @@ _FX NTSTATUS DriverEntry(
     }
 
     if (ok)
+        Dyndata_Init();
+
+    if (ok)
         ok = Driver_FindHomePath(RegistryPath);
 
-    MyValidateCertificate();
+    if (ok)
+        MyValidateCertificate();
 
     //
     // initialize simple utility modules.  these don't hook anything
@@ -277,12 +290,14 @@ _FX NTSTATUS DriverEntry(
 //---------------------------------------------------------------------------
 // Driver_CheckOsVersion
 //---------------------------------------------------------------------------
-unsigned int g_TrapFrameOffset = 0;
+
 
 _FX BOOLEAN Driver_CheckOsVersion(void)
 {
     ULONG MajorVersion, MinorVersion;
     WCHAR str[64];
+
+    Driver_OsTestSigning = MyIsTestSigning();
 
     //
     // make sure we're running on Windows XP (v5.1) or later (32-bit)
@@ -303,45 +318,27 @@ _FX BOOLEAN Driver_CheckOsVersion(void)
             (   MajorVersion == MajorVersionMin
              && MinorVersion >= MinorVersionMin)) {
 
-        // $Offset$ - Hard Offset Dependency
-
         if (MajorVersion == 10) { // for windows 11 its still 10
             Driver_OsVersion = DRIVER_WINDOWS_10;
-#ifdef _WIN64
-            g_TrapFrameOffset = 0x90;
-#endif
-
         }
         else if (MajorVersion == 6) {
 
             if (MinorVersion == 3 && Driver_OsBuild >= 9600) {
                 Driver_OsVersion = DRIVER_WINDOWS_81;
-#ifdef _WIN64
-                g_TrapFrameOffset = 0x90;
-#endif
             }
             else if (MinorVersion == 2 && Driver_OsBuild >= 9200) {
                 Driver_OsVersion = DRIVER_WINDOWS_8;
-#ifdef _WIN64
-                g_TrapFrameOffset = 0x90;
-#endif
             }
 
             else if (MinorVersion == 1 && Driver_OsBuild >= 7600) {
                 Driver_OsVersion = DRIVER_WINDOWS_7;
-#ifdef _WIN64
-                g_TrapFrameOffset = 0x1d8;
-#endif
             }
             else if (MinorVersion == 0 && Driver_OsBuild >= 6000) {
                 Driver_OsVersion = DRIVER_WINDOWS_VISTA;
-                g_TrapFrameOffset = 0x00;
             }
 
         }
         else {
-            g_TrapFrameOffset = 0x00;
-
             if (MinorVersion == 2)
                 Driver_OsVersion = DRIVER_WINDOWS_2003;
 
@@ -618,7 +615,22 @@ _FX BOOLEAN Driver_FindHomePath(UNICODE_STRING *RegistryPath)
 #ifdef _M_ARM64
 _FX BOOLEAN Driver_FindKiServiceInternal()
 {
-    UCHAR *addr = (UCHAR *)ZwWaitForSingleObject; // pick some random Zw function
+    UCHAR *addr = NULL; // pick some random Zw function
+
+    //
+    // Driver verifier messes with the Zw imports, and this breaks the Hook_Find_ZwRoutine routine
+    // to fix this we lookup the offsets of the real functions in the export table of ntoskrnl.exe
+    // and then use these correct offsets in Hook_Find_ZwRoutine
+    //
+
+    UCHAR* kernel_base = (UCHAR*)Syscall_GetKernelBase();
+    if (kernel_base) {
+
+        ULONG_PTR offset = (ULONG_PTR)Dll_GetProc(Exe_NTOSKRNL, "ZwWaitForSingleObject", TRUE);
+        if (offset) addr = kernel_base + offset;
+    }
+
+    if(!addr) addr = (UCHAR *)ZwWaitForSingleObject;
 
     // a ZwXxx system service redirector looks like this in Windows 11 ARM64
     // B0 01 80 D2 7F 1E 00 14 00 00 00 00 00 00 00 00
@@ -678,32 +690,6 @@ void* Driver_FindMissingService(const char* ProcName, int prmcnt)
 
 _FX BOOLEAN Driver_FindMissingServices(void)
 {
-#ifdef OLD_DDK
-    UNICODE_STRING uni;
-	RtlInitUnicodeString(&uni, L"ZwSetInformationToken");
-
-    //
-    // Windows 7 kernel exports ZwSetInformationToken
-    // on earlier versions of Windows, we search for it
-    //
-//#ifndef _WIN64
-    if (Driver_OsVersion < DRIVER_WINDOWS_7) {
-
-        ZwSetInformationToken = (P_NtSetInformationToken) Driver_FindMissingService("ZwSetInformationToken", 4);
-
-    } else 
-//#endif
-	{
-		ZwSetInformationToken = (P_NtSetInformationToken) MmGetSystemRoutineAddress(&uni);
-    }
-
-    if (!ZwSetInformationToken) {
-		Log_Msg1(MSG_1108, uni.Buffer);
-		return FALSE;
-	}
-#endif
-
-
     //
     // Retrieve some unexported kernel functions which may be useful
     //
@@ -756,7 +742,34 @@ _FX BOOLEAN Driver_FindMissingServices(void)
         ZwCreateTokenEx = (P_NtCreateTokenEx)Driver_FindMissingService("ZwCreateTokenEx", 17);
         //DbgPrint("ZwCreateTokenEx: %p\r\n", ZwCreateTokenEx);
     }
+    if (!ZwCreateToken)
+        Log_Msg1(MSG_1108, L"ZwCreateTokenEx");
 
+#endif
+
+#ifdef OLD_DDK
+    UNICODE_STRING uni;
+	RtlInitUnicodeString(&uni, L"ZwSetInformationToken");
+
+    //
+    // Windows 7 kernel exports ZwSetInformationToken
+    // on earlier versions of Windows, we search for it
+    //
+//#ifndef _WIN64
+    if (Driver_OsVersion < DRIVER_WINDOWS_7) {
+
+        ZwSetInformationToken = (P_NtSetInformationToken) Driver_FindMissingService("ZwSetInformationToken", 4);
+
+    } else 
+//#endif
+	{
+		ZwSetInformationToken = (P_NtSetInformationToken) MmGetSystemRoutineAddress(&uni);
+    }
+
+    if (!ZwSetInformationToken) {
+		Log_Msg1(MSG_1108, uni.Buffer);
+		return FALSE;
+	}
 #endif
 
     return TRUE;
@@ -862,52 +875,4 @@ _FX NTSTATUS Driver_Api_Unload(PROCESS *proc, ULONG64 *parms)
     Driver_Object->DriverUnload = SbieDrv_DriverUnload;
 
     return STATUS_SUCCESS;
-}
-
-
-//---------------------------------------------------------------------------
-// Driver_GetRegDword
-//---------------------------------------------------------------------------
-
-
-_FX ULONG Driver_GetRegDword(
-    const WCHAR *KeyPath, const WCHAR *ValueName)
-{
-    NTSTATUS status;
-    RTL_QUERY_REGISTRY_TABLE qrt[2];
-    UNICODE_STRING uni;
-    ULONG value;
-
-    value = -1;
-
-    uni.Length = 4;
-    uni.MaximumLength = 4;
-    uni.Buffer = (WCHAR *)&value;
-
-    memzero(qrt, sizeof(qrt));
-    qrt[0].Flags =  RTL_QUERY_REGISTRY_REQUIRED |
-                    RTL_QUERY_REGISTRY_DIRECT |
-                    RTL_QUERY_REGISTRY_TYPECHECK |
-                    RTL_QUERY_REGISTRY_NOEXPAND;
-    qrt[0].Name = (WCHAR *)ValueName;
-    qrt[0].EntryContext = &uni;
-    qrt[0].DefaultType = (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_NONE;
-
-    status = RtlQueryRegistryValues(
-        RTL_REGISTRY_ABSOLUTE, KeyPath, qrt, NULL, NULL);
-
-    if (status != STATUS_SUCCESS)
-        return 0;
-
-    if (value == -1) {
-
-        //
-        // if value is not string, RtlQueryRegistryValues writes
-        // it directly into EntryContext
-        //
-
-        value = *(ULONG *)&uni;
-    }
-
-    return value;
 }
